@@ -1,0 +1,17 @@
+[project]
+name = "tiny-chirp-microflow-building"
+version = "0.1.0"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "tensorflow[and-cuda]>=2.10",
+  "numpy",
+  "librosa",
+  "ipykernel",
+  "jupyter",
+  "tensorflow-io[tensorflow]>=0.37.1",
+  "keras>=3.13.2",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
