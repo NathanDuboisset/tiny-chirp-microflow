@@ -5,7 +5,6 @@ use nalgebra::SMatrix;
 pub const SAMPLE_RATE: usize = 16_000;
 pub const FRAME_LENGTH: usize = 1024;
 pub const FRAME_STEP: usize = 256;
-// microfft::real::rfft_1024 returns 1024/2 complex bins.
 pub const FFT_BINS: usize = 512;
 pub const MEL_BINS: usize = 80;
 pub const FRAMES: usize = 184;
