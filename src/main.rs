@@ -68,17 +68,17 @@ async fn main() {
         } else {
             "non_target"
         };
+        let end_time = Instant::now().as_micros();
+        let duration = end_time - start_time;
         info!(
-            "{} | {} | {} | {} | {}",
+            "{} | {} | {} | {} | {} in {} us",
             i,
             clip.expected_label,
             predicted_label,
             prediction[(0, 0)],
-            prediction[(0, 1)]
+            prediction[(0, 1)],
+            duration
         );
-        let end_time = Instant::now().as_micros();
-        let duration = end_time - start_time;
-        info!("Duration: {} us", duration);
         i += 1;
     }
     exit(ExitCode::SUCCESS);
