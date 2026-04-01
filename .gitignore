@@ -12,3 +12,4 @@ src/audio_sample.rs
 /build
 .gdb_history
 *_savedmodel/
+*_saved_model/
