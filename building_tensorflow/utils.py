@@ -9,11 +9,18 @@ from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
+
+from pydantic import BaseModel
+
 if TYPE_CHECKING:
     import keras
 else:
-    
     keras = tf.keras
+
+from tensorflow.python.framework.convert_to_constants import (
+    convert_variables_to_constants_v2_as_graph,
+)
+
 
 # GLOBAL CONFIGURATION / PATHS
 
@@ -86,11 +93,12 @@ TARGET_AUDIO_LEN_TIME = (TARGET_FRAMES_TIME - 1) * FRAME_STEP + FRAME_LENGTH
 
 # CNN mel
 FFT_LENGTH_MEL = FRAME_LENGTH
-NUM_MEL_BINS_MEL = 80 
+NUM_MEL_BINS_MEL = 80
 LOWER_EDGE_HERTZ = 80.0
 UPPER_EDGE_HERTZ = 8000.0
-TARGET_FRAMES_MEL = 184 
+TARGET_FRAMES_MEL = 184
 TARGET_AUDIO_LEN_MEL = (TARGET_FRAMES_MEL - 1) * FRAME_STEP + FRAME_LENGTH
+
 
 # DATASET HELPERS
 def make_audio_datasets(
@@ -166,18 +174,15 @@ def make_time_datasets(
     )
 
     # Compute finite cardinalities before repeating.
-    train_ds = (
-        train_raw.map(time_to_features, num_parallel_calls=tf.data.AUTOTUNE)
-        .prefetch(2)
-    )
-    val_ds = (
-        val_raw.map(time_to_features, num_parallel_calls=tf.data.AUTOTUNE)
-        .prefetch(2)
-    )
-    test_ds = (
-        test_raw.map(time_to_features, num_parallel_calls=tf.data.AUTOTUNE)
-        .prefetch(2)
-    )
+    train_ds = train_raw.map(
+        time_to_features, num_parallel_calls=tf.data.AUTOTUNE
+    ).prefetch(2)
+    val_ds = val_raw.map(
+        time_to_features, num_parallel_calls=tf.data.AUTOTUNE
+    ).prefetch(2)
+    test_ds = test_raw.map(
+        time_to_features, num_parallel_calls=tf.data.AUTOTUNE
+    ).prefetch(2)
 
     return train_ds, val_ds, test_ds, label_names
 
@@ -304,7 +309,31 @@ def make_mel_datasets(
     return train_ds, val_ds, test_ds, label_names
 
 
-# METRICS 
+# METRICS
+
+
+def get_flops_native(model, batch_size=1):
+    inputs = []
+    for i in range(len(model.inputs)):
+        base_shape = list(model.inputs[i].shape[1:])
+        full_shape = [batch_size] + base_shape
+
+        spec = tf.TensorSpec(full_shape, model.inputs[i].dtype)
+        inputs.append(spec)
+
+    real_model = tf.function(model).get_concrete_function(inputs)
+
+    frozen_func, graph_def = convert_variables_to_constants_v2_as_graph(real_model)
+
+    run_meta = tf.compat.v1.RunMetadata()
+    opts = tf.compat.v1.profiler.ProfileOptionBuilder.float_operation()
+    opts["output"] = "none"
+
+    flops = tf.compat.v1.profiler.profile(
+        graph=frozen_func.graph, run_meta=run_meta, cmd="op", options=opts
+    )
+
+    return flops.total_float_ops if flops is not None else 0
 
 
 def plot_training_history(
@@ -326,7 +355,9 @@ def plot_training_history(
         history_dict = cast(dict[str, Any], history)
 
     if not isinstance(history_dict, dict):
-        raise ValueError("`history` must be a Keras History object or a dict-like `history.history`.")
+        raise ValueError(
+            "`history` must be a Keras History object or a dict-like `history.history`."
+        )
 
     loss_key = "loss"
     val_loss_key = "val_loss"
@@ -338,7 +369,11 @@ def plot_training_history(
 
     # Keras can report accuracy under different names depending on label encoding.
     accuracy_key = next(
-        (k for k in ("accuracy", "sparse_categorical_accuracy", "categorical_accuracy") if k in history_dict),
+        (
+            k
+            for k in ("accuracy", "sparse_categorical_accuracy", "categorical_accuracy")
+            if k in history_dict
+        ),
         None,
     )
     if accuracy_key is None:
@@ -390,13 +425,28 @@ def plot_training_history(
     plt.tight_layout()
     plt.show()
 
+
+class EvalMetrics(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    threshold: float
+    accuracy: float
+    precision: float
+    recall: float
+    f2: float
+    auc: float | None = None
+    roc_fpr: np.ndarray | None = None
+    roc_tpr: np.ndarray | None = None
+    roc_thresholds: np.ndarray | None = None
+
+
 def evaluate_binary_classifier(
     model: "keras.Model",
     train_dataset: tf.data.Dataset,
     test_dataset: tf.data.Dataset,
     display: bool = True,
     threshold: float = 0.5,
-) -> dict:
+) -> tuple[EvalMetrics, EvalMetrics]:
     """Compute accuracy, precision, recall, F2, AUC and ROC curve for a model.
 
     Assumes a binary classification task with labels in {0, 1}.
@@ -409,7 +459,9 @@ def evaluate_binary_classifier(
       - Test: prints accuracy/precision/recall/F2 (and does not plot ROC by default)
     """
 
-    def _evaluate_one(ds: tf.data.Dataset, compute_roc: bool, find_best_f2_threshold: bool = False) -> dict:
+    def evaluate_one(
+        ds: tf.data.Dataset, compute_roc: bool, find_best_f2_threshold: bool = False
+    ) -> EvalMetrics:
         y_true_list: list[np.ndarray] = []
         y_score_list: list[np.ndarray] = []
 
@@ -458,7 +510,11 @@ def evaluate_binary_classifier(
                 prec_thr = tp_thr / (tp_thr + fp_thr) if (tp_thr + fp_thr) > 0 else 0.0
                 rec_thr = tp_thr / (tp_thr + fn_thr) if (tp_thr + fn_thr) > 0 else 0.0
                 denom_thr = (beta**2) * prec_thr + rec_thr
-                f2_thr = (1.0 + beta**2) * prec_thr * rec_thr / denom_thr if denom_thr > 0 else 0.0
+                f2_thr = (
+                    (1.0 + beta**2) * prec_thr * rec_thr / denom_thr
+                    if denom_thr > 0
+                    else 0.0
+                )
                 if f2_thr > best_f2_thr:
                     best_f2_thr = f2_thr
                     best_thr = thr
@@ -484,24 +540,16 @@ def evaluate_binary_classifier(
         denom = (beta * beta) * precision + recall
         f2 = (1.0 + beta * beta) * precision * recall / denom if denom > 0 else 0.0
 
-        out: dict[str, float | None | np.ndarray] = {
-            "threshold": applied_threshold,
-            "accuracy": float(accuracy),
-            "precision": float(precision),
-            "recall": float(recall),
-            "f2": float(f2),
-        }
+        metrics = EvalMetrics(
+            threshold=applied_threshold,
+            accuracy=float(accuracy),
+            precision=float(precision),
+            recall=float(recall),
+            f2=float(f2),
+        )
 
         if not compute_roc:
-            out.update(
-                {
-                    "auc": None,
-                    "roc_fpr": None,
-                    "roc_tpr": None,
-                    "roc_thresholds": None,
-                }
-            )
-            return out
+            return metrics
 
         # ROC curve and AUC
         # Sort by decreasing score.
@@ -538,54 +586,56 @@ def evaluate_binary_classifier(
         tpr_arr = tpr_arr[order_roc]
 
         auc = np.trapz(tpr_arr, fpr_arr)
-        out.update(
-            {
-                "auc": float(auc),
-                "roc_fpr": fpr_arr,
-                "roc_tpr": tpr_arr,
-                "roc_thresholds": thresholds_arr[order_roc],
-            }
-        )
-        return out
+        metrics.auc = float(auc)
+        metrics.roc_fpr = fpr_arr
+        metrics.roc_tpr = tpr_arr
+        metrics.roc_thresholds = thresholds_arr[order_roc]
+        return metrics
 
-    # Evaluate training.
-    # Always compute ROC/AUC for training so callers can plot from returned arrays.
-    train_metrics = _evaluate_one(train_dataset, compute_roc=True)
-    # For the test set, sweep all unique score values and pick the threshold that
-    # maximises the F2 score rather than relying on the fixed default.
-    test_metrics = _evaluate_one(test_dataset, compute_roc=False, find_best_f2_threshold=True)
+    train_metrics = evaluate_one(train_dataset, compute_roc=True)
+    test_metrics = evaluate_one(
+        test_dataset, compute_roc=False, find_best_f2_threshold=True
+    )
 
-    if display:
-
-        print("=== Binary classifier metrics : TEST SET===")
-        print(f"Threshold: {test_metrics['threshold']:.4f}  (best F2 threshold)")
-        print(f"Accuracy : {test_metrics['accuracy']:.4f}")
-        print(f"Precision: {test_metrics['precision']:.4f}")
-        print(f"Recall   : {test_metrics['recall']:.4f}")
-        print(f"F2 score : {test_metrics['f2']:.4f}")
-
-        print("=== Binary classifier metrics : TRAIN SET===")
-        print(f"AUC      : {train_metrics['auc']:.4f}")
-
-        import matplotlib.pyplot as plt
-
-        plt.figure()
-        plt.plot(train_metrics["roc_fpr"], train_metrics["roc_tpr"], label=f"AUC = {train_metrics['auc']:.3f}")
-        plt.plot([0, 1], [0, 1], "k--", linewidth=0.8)
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("ROC curve")
-        plt.legend()
-        plt.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
-        plt.tight_layout()
-        plt.show()
-
-    return {"train": train_metrics, "test": test_metrics}
+    return train_metrics, test_metrics
 
 
+def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) -> None:
+    print("=== Binary classifier metrics : TEST SET===")
+    print(f"Threshold: {test_metrics.threshold:.4f}  (best F2 threshold)")
+    print(f"Accuracy : {test_metrics.accuracy:.4f}")
+    print(f"Precision: {test_metrics.precision:.4f}")
+    print(f"Recall   : {test_metrics.recall:.4f}")
+    print(f"F2 score : {test_metrics.f2:.4f}")
+
+    print("=== Binary classifier metrics : TRAIN SET===")
+    print(f"AUC      : {train_metrics.auc:.4f}")
+
+    import matplotlib.pyplot as plt
+
+    if train_metrics.roc_fpr is None or train_metrics.roc_tpr is None:
+        raise ValueError("ROC curve data is missing.")
+
+    plt.figure()
+    plt.plot(
+        train_metrics.roc_fpr,
+        train_metrics.roc_tpr,
+        label=f"AUC = {train_metrics.auc:.3f}",
+    )
+
+    plt.plot([0, 1], [0, 1], "k--", linewidth=0.8)
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.xscale("log")
+    plt.title("ROC curve")
+    plt.legend()
+    plt.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
+    plt.tight_layout()
+    plt.show()
 
 
 # TFLite export helpers
+
 
 def build_representative_batches(
     dataset: tf.data.Dataset,
@@ -670,13 +720,16 @@ def collect_test_clips_for_rs(
         if label_idx not in clips_by_label:
             clips_by_label[label_idx] = []
         if len(clips_by_label[label_idx]) < num_per_label:
-            fixed = fix_audio_length_time(
-                tf.expand_dims(audio_batch, 0)
-            )[0].numpy().astype(np.float32)  # ty:ignore[not-subscriptable]
+            fixed = (
+                fix_audio_length_time(tf.expand_dims(audio_batch, 0))[0]  # ty:ignore[not-subscriptable]
+                .numpy()
+                .astype(np.float32)
+            )
             clips_by_label[label_idx].append(fixed)
-        if all(len(v) >= num_per_label for v in clips_by_label.values()) and len(
-            clips_by_label
-        ) >= 2:
+        if (
+            all(len(v) >= num_per_label for v in clips_by_label.values())
+            and len(clips_by_label) >= 2
+        ):
             break
 
     if len(clips_by_label) < 2:
@@ -688,7 +741,7 @@ def collect_test_clips_for_rs(
         for label_idx in sorted(clips_by_label.keys()):
             label_name = "target" if label_idx == 1 else "non_target"
             audio = clips_by_label[label_idx][i]
-            rel_path = f"dataset/testing/{label_name}/sample_{i+1}.wav"
+            rel_path = f"dataset/testing/{label_name}/sample_{i + 1}.wav"
             ordered.append((label_name, audio, rel_path))
 
     return ordered
@@ -718,11 +771,10 @@ def write_audio_sample_rs(
     rs.append(f"pub const TEST_CLIPS: [TestClip; {len(clips)}] = [\n")
     for i, (label, _audio, rel_path) in enumerate(clips, 1):
         rs.append("    TestClip {\n")
-        rs.append(f"        expected_label: \"{label}\",\n")
-        rs.append(f"        source_file: \"{rel_path}\",\n")
+        rs.append(f'        expected_label: "{label}",\n')
+        rs.append(f'        source_file: "{rel_path}",\n')
         rs.append(f"        audio: CLIP_{i},\n")
         rs.append("    },\n")
     rs.append("];\n")
 
     out_path.write_text("".join(rs), encoding="utf-8")
-

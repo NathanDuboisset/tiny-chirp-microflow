@@ -21,6 +21,10 @@ struct BirdModel;
 #[model("models/cnn_time_tf.tflite")]
 struct BirdModel;
 
+#[cfg(all(feature = "sincnet_time", feature = "tf"))]
+#[model("models/sincnet_time_tf.tflite")]
+struct BirdModel;
+
 #[ariel_os::task(autostart)]
 async fn main() {
     info!("tiny-chirp-microflow on {}.", ariel_os::buildinfo::BOARD);
@@ -46,7 +50,7 @@ async fn main() {
 
         #[cfg(feature = "cnn_mel")]
         let input = spectrogram::compute(clip.audio);
-        #[cfg(feature = "cnn_time")]
+        #[cfg(any(feature = "cnn_time", feature = "sincnet_time"))]
         let input = audio_raw::prepare(clip.audio);
 
         let prediction = BirdModel::predict(input);
