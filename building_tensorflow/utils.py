@@ -9,6 +9,7 @@ from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
+import json
 
 from pydantic import BaseModel
 
@@ -632,6 +633,51 @@ def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) 
     plt.grid(True, linestyle="--", linewidth=0.5, alpha=0.7)
     plt.tight_layout()
     plt.show()
+
+
+def _metrics_to_dict(m: EvalMetrics) -> dict:
+    d = m.model_dump()
+    for key in ("roc_fpr", "roc_tpr", "roc_thresholds"):
+        if d[key] is not None:
+            d[key] = d[key].tolist()
+    return d
+
+
+def _dict_to_metrics(d: dict) -> EvalMetrics:
+    for key in ("roc_fpr", "roc_tpr", "roc_thresholds"):
+        if d[key] is not None:
+            d[key] = np.array(d[key])
+    return EvalMetrics(**d)
+
+
+def load_results(
+    results_path: Path,
+) -> dict[tuple[int, int, int, int], tuple[EvalMetrics, EvalMetrics]]:
+    cache: dict[tuple[int, int, int, int], tuple[EvalMetrics, EvalMetrics]] = {}
+    if not results_path.exists():
+        return cache
+    with results_path.open() as f:
+        for line in f:
+            row = json.loads(line)
+            key = tuple(row["params"])
+            cache[key] = (_dict_to_metrics(row["train"]), _dict_to_metrics(row["test"]))
+    return cache
+
+
+def save_result(
+    results_path: Path,
+    params: tuple[int, int, int, int],
+    train_m: EvalMetrics,
+    test_m: EvalMetrics,
+) -> None:
+    results_path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "params": list(params),
+        "train": _metrics_to_dict(train_m),
+        "test": _metrics_to_dict(test_m),
+    }
+    with results_path.open("a") as f:
+        f.write(json.dumps(row) + "\n")
 
 
 # TFLite export helpers

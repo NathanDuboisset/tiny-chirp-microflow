@@ -3,7 +3,7 @@ name = "tiny-chirp-microflow-building"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-  "tensorflow>=2.10",
+  "tensorflow[and-cuda]>=2.10",
   "numpy",
   "librosa",
   "ipykernel",
@@ -14,6 +14,8 @@ dependencies = [
   "tqdm>=4.67.3",
   "keras-flops>=0.1.2",
   "pydantic>=2.12.5",
+  "wandb>=0.25.1",
+  "types-tensorflow>=2.18.0.20260408",
 ]
 
 [build-system]
