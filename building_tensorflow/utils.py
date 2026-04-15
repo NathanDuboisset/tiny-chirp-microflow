@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import random
+import time
+import wandb
 from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 
 import numpy as np
@@ -145,7 +147,7 @@ def fix_audio_length_time(audio: tf.Tensor) -> tf.Tensor:
     audio = audio[:, :TARGET_AUDIO_LEN_TIME]
     current_len = tf.shape(audio)[1]
     pad_len = tf.maximum(0, TARGET_AUDIO_LEN_TIME - current_len)
-    audio = tf.pad(audio, [[0, 0], [0, pad_len]])
+    audio = tf.pad(audio, [[0, 0], [0, pad_len]])  # ty:ignore[invalid-argument-type]
     audio = tf.ensure_shape(audio, [None, TARGET_AUDIO_LEN_TIME])
     audio = tf.expand_dims(audio, axis=-1)  # [batch, time, 1]
     return audio
@@ -245,7 +247,7 @@ def fix_audio_length_mel(audio: tf.Tensor) -> tf.Tensor:
     audio = audio[:, :TARGET_AUDIO_LEN_MEL]
     current_len = tf.shape(audio)[1]
     pad_len = tf.maximum(0, TARGET_AUDIO_LEN_MEL - current_len)
-    audio = tf.pad(audio, [[0, 0], [0, pad_len]])
+    audio = tf.pad(audio, [[0, 0], [0, pad_len]])  # ty:ignore[invalid-argument-type]
     audio = tf.ensure_shape(audio, [None, TARGET_AUDIO_LEN_MEL])
     return audio
 
@@ -767,7 +769,7 @@ def collect_test_clips_for_rs(
             clips_by_label[label_idx] = []
         if len(clips_by_label[label_idx]) < num_per_label:
             fixed = (
-                fix_audio_length_time(tf.expand_dims(audio_batch, 0))[0]  # ty:ignore[not-subscriptable]
+                fix_audio_length_time(tf.expand_dims(audio_batch, 0))[0]
                 .numpy()
                 .astype(np.float32)
             )
@@ -824,3 +826,89 @@ def write_audio_sample_rs(
     rs.append("];\n")
 
     out_path.write_text("".join(rs), encoding="utf-8")
+
+
+# W&B helpers
+
+
+def init_wandb(run_name: str, config: dict, project: str = "tinychirp") -> None:
+    import wandb
+
+    wandb.init(name=run_name, project=project, config=config)
+
+
+class TimingCallback(tf.keras.callbacks.Callback):
+    def __init__(self, batch_size, log_freq=10):
+        super().__init__()
+        self.batch_size = batch_size
+        self.log_freq = log_freq
+
+    def on_train_batch_begin(self, batch, logs=None):
+        self._train_start = time.time()
+
+    def on_train_batch_end(self, batch, logs=None):
+        step_time = time.time() - self._train_start
+
+        if batch % self.log_freq == 0:
+            wandb.log(
+                {
+                    "train/step_time": step_time,
+                    "train/samples_per_sec": self.batch_size / step_time,
+                }
+            )
+
+    def on_test_begin(self, logs=None):
+        self._val_epoch_start = time.time()
+
+    def on_test_end(self, logs=None):
+        val_time = time.time() - self._val_epoch_start
+
+        log_dict = {"val/epoch_time": val_time}
+
+        if hasattr(self, "params"):
+            steps = self.params.get("steps")
+            if steps:
+                total = steps * self.batch_size
+                log_dict["val/samples_per_sec_epoch"] = total / val_time
+
+        wandb.log(log_dict)
+
+    def on_test_batch_begin(self, batch, logs=None):
+        self._val_start = time.time()
+
+    def on_test_batch_end(self, batch, logs=None):
+        step_time = time.time() - self._val_start
+
+        if batch % self.log_freq == 0:
+            wandb.log(
+                {
+                    "val/step_time": step_time,
+                    "val/samples_per_sec": self.batch_size / step_time,
+                }
+            )
+
+
+def get_callbacks(
+    patience: int | None = None,
+    log_freq: int = 5,
+    batch_size: int = 32,
+) -> list:
+    from wandb.integration.keras import WandbMetricsLogger, WandbModelCheckpoint
+
+    callbacks = []
+    callbacks.append(WandbMetricsLogger(log_freq=log_freq))
+    callbacks.append(WandbModelCheckpoint("models.keras"))
+    callbacks.append(TimingCallback(batch_size=batch_size, log_freq=log_freq))
+    if patience is not None:
+        callbacks.append(
+            keras.callbacks.EarlyStopping(
+                patience=patience, restore_best_weights=True, monitor="val_loss"
+            )
+        )
+    return callbacks
+
+
+def finish_wandb() -> None:
+    import wandb
+
+    wandb.finish()
