@@ -10,9 +10,6 @@ import wandb
 
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
-import json
-
 from pydantic import BaseModel, field_serializer, field_validator
 
 if TYPE_CHECKING:
@@ -474,166 +471,6 @@ class TFLiteEvalRecord(BaseModel):
     test: EvalMetrics
 
 
-def evaluate_binary_classifier(
-    model: "keras.Model",
-    train_dataset: tf.data.Dataset,
-    test_dataset: tf.data.Dataset,
-    display: bool = True,
-    threshold: float = 0.5,
-) -> tuple[EvalMetrics, EvalMetrics]:
-    """Compute accuracy, precision, recall, F2, AUC and ROC curve for a model.
-
-    Assumes a binary classification task with labels in {0, 1}.
-    The model is expected to output either:
-      * a single logit/probability per example (shape [..., 1]), or
-      * two logits/probabilities for classes 0 and 1 (shape [..., 2]).
-
-    If `test_dataset` is provided, the function will evaluate both:
-      - Training: prints accuracy/precision/recall/F2 and (when `display=True`) AUC + ROC plot
-      - Test: prints accuracy/precision/recall/F2 (and does not plot ROC by default)
-    """
-
-    def evaluate_one(
-        ds: tf.data.Dataset, compute_roc: bool, find_best_f2_threshold: bool = False
-    ) -> EvalMetrics:
-        y_true_list: list[np.ndarray] = []
-        y_score_list: list[np.ndarray] = []
-
-        for i, (x_batch, y_batch) in tqdm(enumerate(ds)):
-            preds = model(x_batch, training=False)
-            preds_np = preds.numpy()
-            y_np = y_batch.numpy()
-
-            # Flatten labels to 1D
-            y_np = np.reshape(y_np, (-1,))
-
-            # Convert model outputs to probability of the positive class.
-            if preds_np.shape[-1] == 1:
-                # Single logit or probability.
-                probs = tf.math.sigmoid(preds_np).numpy()
-                probs = np.reshape(probs, (-1,))
-            elif preds_np.shape[-1] == 2:
-                # Two-class logits/probabilities; take class-1 probability.
-                probs = tf.nn.softmax(preds_np, axis=-1).numpy()[..., 1]
-                probs = np.reshape(probs, (-1,))
-            else:
-                raise ValueError(
-                    "evaluate_binary_classifier expects model outputs of shape "
-                    "[..., 1] or [..., 2] for binary classification."
-                )
-
-            y_true_list.append(y_np)
-            y_score_list.append(probs)
-
-        if not y_true_list:
-            raise ValueError("Dataset appears to be empty; no batches were processed.")
-
-        y_true = np.concatenate(y_true_list, axis=0)
-        y_score = np.concatenate(y_score_list, axis=0)
-
-        # Select the threshold that maximises F2 by sweeping all unique score values.
-        if find_best_f2_threshold:
-            best_thr = threshold
-            best_f2_thr = -1.0
-            beta = 2.0
-            for thr in np.unique(y_score):
-                y_pred_thr = (y_score >= thr).astype(np.int32)
-                tp_thr = np.sum((y_true == 1) & (y_pred_thr == 1))
-                fp_thr = np.sum((y_true == 0) & (y_pred_thr == 1))
-                fn_thr = np.sum((y_true == 1) & (y_pred_thr == 0))
-                prec_thr = tp_thr / (tp_thr + fp_thr) if (tp_thr + fp_thr) > 0 else 0.0
-                rec_thr = tp_thr / (tp_thr + fn_thr) if (tp_thr + fn_thr) > 0 else 0.0
-                denom_thr = (beta**2) * prec_thr + rec_thr
-                f2_thr = (
-                    (1.0 + beta**2) * prec_thr * rec_thr / denom_thr
-                    if denom_thr > 0
-                    else 0.0
-                )
-                if f2_thr > best_f2_thr:
-                    best_f2_thr = f2_thr
-                    best_thr = thr
-            applied_threshold = float(best_thr)
-        else:
-            applied_threshold = threshold
-
-        # Predicted labels via threshold
-        y_pred = (y_score >= applied_threshold).astype(np.int32)
-
-        # Confusion matrix elements
-        tp = np.sum((y_true == 1) & (y_pred == 1))
-        tn = np.sum((y_true == 0) & (y_pred == 0))
-        fp = np.sum((y_true == 0) & (y_pred == 1))
-        fn = np.sum((y_true == 1) & (y_pred == 0))
-
-        total = tp + tn + fp + fn
-        accuracy = (tp + tn) / total if total > 0 else 0.0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-
-        beta = 2.0
-        denom = (beta * beta) * precision + recall
-        f2 = (1.0 + beta * beta) * precision * recall / denom if denom > 0 else 0.0
-
-        metrics = EvalMetrics(
-            threshold=applied_threshold,
-            accuracy=float(accuracy),
-            precision=float(precision),
-            recall=float(recall),
-            f2=float(f2),
-        )
-
-        if not compute_roc:
-            return metrics
-
-        # ROC curve and AUC
-        # Sort by decreasing score.
-        order = np.argsort(-y_score)
-        y_true_sorted = y_true[order]
-        y_score_sorted = y_score[order]
-
-        # Unique thresholds (including edge cases)
-        thresholds_arr = np.r_[np.inf, np.unique(y_score_sorted)[::-1], -np.inf]
-
-        tpr_list = []
-        fpr_list = []
-
-        P = np.sum(y_true_sorted == 1)
-        N = np.sum(y_true_sorted == 0)
-
-        for thr in thresholds_arr:
-            y_pred_thr = (y_score_sorted >= thr).astype(np.int32)
-            tp_thr = np.sum((y_true_sorted == 1) & (y_pred_thr == 1))
-            fp_thr = np.sum((y_true_sorted == 0) & (y_pred_thr == 1))
-
-            tpr = tp_thr / P if P > 0 else 0.0
-            fpr = fp_thr / N if N > 0 else 0.0
-
-            tpr_list.append(tpr)
-            fpr_list.append(fpr)
-
-        fpr_arr = np.array(fpr_list)
-        tpr_arr = np.array(tpr_list)
-
-        # Sort by FPR for a well-defined curve, then integrate.
-        order_roc = np.argsort(fpr_arr)
-        fpr_arr = fpr_arr[order_roc]
-        tpr_arr = tpr_arr[order_roc]
-
-        auc = np.trapz(tpr_arr, fpr_arr)
-        metrics.auc = float(auc)
-        metrics.roc_fpr = fpr_arr
-        metrics.roc_tpr = tpr_arr
-        metrics.roc_thresholds = thresholds_arr[order_roc]
-        return metrics
-
-    train_metrics = evaluate_one(train_dataset, compute_roc=True)
-    test_metrics = evaluate_one(
-        test_dataset, compute_roc=False, find_best_f2_threshold=True
-    )
-
-    return train_metrics, test_metrics
-
-
 def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) -> None:
     print("=== Binary classifier metrics : TEST SET===")
     print(f"Threshold: {test_metrics.threshold:.4f}  (best F2 threshold)")
@@ -676,220 +513,97 @@ def evaluate_tflite_model(
     results_dir: Path | None = None,
 ) -> tuple[EvalMetrics, EvalMetrics, float]:
     """Evaluate an INT8-quantized TFLite model with a train-chosen best F2 threshold."""
+    from datetime import datetime, timezone
+    from sklearn.metrics import (
+        accuracy_score,
+        precision_score,
+        recall_score,
+        fbeta_score,
+        roc_curve,
+        roc_auc_score,
+        precision_recall_curve,
+    )
 
     if results_dir is None:
         results_dir = REPO_ROOT / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
-
     tflite_path = Path(tflite_path)
     if not tflite_path.exists():
         raise FileNotFoundError(str(tflite_path))
 
-    results_path = results_dir / f"{model_name}.jsonl"
-
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
     interpreter.allocate_tensors()
+    inp = interpreter.get_input_details()[0]
+    out = interpreter.get_output_details()[0]
 
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-    if len(input_details) != 1 or len(output_details) < 1:
-        raise ValueError(
-            "Expected exactly one input tensor and at least one output tensor."
-        )
+    in_scale, in_zp = inp["quantization"]
+    out_scale, out_zp = out["quantization"]
+    if in_scale == 0 or out_scale == 0:
+        raise ValueError("TFLite quantization scale is 0.")
+    qmin, qmax = (-128, 127) if inp["dtype"] == np.int8 else (0, 255)
 
-    input_info = input_details[0]
-    output_info = output_details[0]
-
-    input_index = input_info["index"]
-    output_index = output_info["index"]
-    input_dtype = input_info["dtype"]
-    input_scale, input_zp = input_info["quantization"]
-    output_scale, output_zp = output_info["quantization"]
-
-    if input_scale == 0 or output_scale == 0:
-        raise ValueError("TFLite quantization scale is 0; cannot quantize/dequantize.")
-
-    if input_dtype == np.int8:
-        qmin, qmax = -128, 127
-    elif input_dtype == np.uint8:
-        qmin, qmax = 0, 255
-    else:
-        raise ValueError(f"Unsupported input dtype for evaluation: {input_dtype}")
-
-    def infer_prob(x_sample: np.ndarray) -> float:
-        x_float = np.asarray(x_sample, dtype=np.float32)
-        x_q = np.round(x_float / input_scale) + input_zp
-        x_q = np.clip(x_q, qmin, qmax).astype(input_dtype)
-        x_q = x_q[None, ...]  # add batch dim
-
-        interpreter.set_tensor(input_index, x_q)
-        interpreter.invoke()
-
-        out_int = interpreter.get_tensor(output_index)
-        out_int = np.asarray(out_int)
-        out_deq = (out_int.astype(np.float32) - float(output_zp)) * float(output_scale)
-        out_vec = out_deq.reshape(-1)
-
-        if out_vec.size == 1:
-            # Sigmoid logit/prob.
-            z = float(out_vec[0])
-            return float(1.0 / (1.0 + np.exp(-z)))
-        if out_vec.size == 2:
-            # Softmax over 2 logits/probs; take class-1 prob.
-            logits = out_vec.astype(np.float32)
-            logits = logits - np.max(logits)  # stable softmax
-            e = np.exp(logits)
-            probs = e / np.sum(e)
-            return float(probs[1])
-        raise ValueError(f"Unexpected output size: {out_vec.size}")
-
-    def metrics_at_threshold(
-        y_true: np.ndarray, y_score: np.ndarray, thr: float
-    ) -> tuple[float, float, float, float]:
-        y_pred = (y_score >= thr).astype(np.int32)
-        tp = int(np.sum((y_true == 1) & (y_pred == 1)))
-        tn = int(np.sum((y_true == 0) & (y_pred == 0)))
-        fp = int(np.sum((y_true == 0) & (y_pred == 1)))
-        fn = int(np.sum((y_true == 1) & (y_pred == 0)))
-
-        total = tp + tn + fp + fn
-        accuracy = (tp + tn) / total if total > 0 else 0.0
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-
-        beta = 2.0
-        denom = (beta * beta) * precision + recall
-        f2 = (1.0 + beta * beta) * precision * recall / denom if denom > 0 else 0.0
-        return float(accuracy), float(precision), float(recall), float(f2)
-
-    # ---------------- Train pass: scores + ROC + best F2 threshold ----------------
-    y_true_train: list[int] = []
-    y_score_train: list[float] = []
-    for x_batch, y_batch in train_dataset.unbatch():
-        x_np = x_batch.numpy()
-        y_np = int(y_batch.numpy())
-        y_true_train.append(y_np)
-        y_score_train.append(infer_prob(x_np))
-
-    y_true_train_arr = np.asarray(y_true_train, dtype=np.int32)
-    y_score_train_arr = np.asarray(y_score_train, dtype=np.float32)
-
-    best_thr = 0.5
-    best_f2 = -1.0
-    for thr in np.unique(y_score_train_arr):
-        _, _, _, f2_thr = metrics_at_threshold(
-            y_true_train_arr, y_score_train_arr, float(thr)
-        )
-        if f2_thr > best_f2:
-            best_f2 = f2_thr
-            best_thr = float(thr)
-
-    # ROC on training set (for plotting).
-    order = np.argsort(-y_score_train_arr)
-    y_true_sorted = y_true_train_arr[order]
-    y_score_sorted = y_score_train_arr[order]
-    thresholds_arr = np.r_[np.inf, np.unique(y_score_sorted)[::-1], -np.inf]
-
-    tpr_list: list[float] = []
-    fpr_list: list[float] = []
-    P = int(np.sum(y_true_sorted == 1))
-    N = int(np.sum(y_true_sorted == 0))
-    for thr in thresholds_arr:
-        y_pred_thr = (y_score_sorted >= float(thr)).astype(np.int32)
-        tp_thr = int(np.sum((y_true_sorted == 1) & (y_pred_thr == 1)))
-        fp_thr = int(np.sum((y_true_sorted == 0) & (y_pred_thr == 1)))
-        tpr_list.append(tp_thr / P if P > 0 else 0.0)
-        fpr_list.append(fp_thr / N if N > 0 else 0.0)
-
-    fpr_arr = np.asarray(fpr_list, dtype=np.float32)
-    tpr_arr = np.asarray(tpr_list, dtype=np.float32)
-    thresholds_ordered = np.asarray(thresholds_arr, dtype=np.float32)
-
-    order_roc = np.argsort(fpr_arr)
-    fpr_arr = fpr_arr[order_roc]
-    tpr_arr = tpr_arr[order_roc]
-    thresholds_ordered = thresholds_ordered[order_roc]
-    auc = float(np.trapz(tpr_arr, fpr_arr))
-
-    acc_train, prec_train, rec_train, f2_train = metrics_at_threshold(
-        y_true_train_arr, y_score_train_arr, best_thr
-    )
-    train_metrics = EvalMetrics(
-        threshold=best_thr,
-        accuracy=acc_train,
-        precision=prec_train,
-        recall=rec_train,
-        f2=f2_train,
-        auc=auc,
-        roc_fpr=fpr_arr,
-        roc_tpr=tpr_arr,
-        roc_thresholds=thresholds_ordered,
-    )
-
-    # ---------------- Test pass: metrics at best_thr + avg inference time ----------------
-    y_true_test: list[int] = []
-    y_score_test: list[float] = []
-    infer_times_s: list[float] = []
-    for x_batch, y_batch in test_dataset.unbatch():
-        x_np = x_batch.numpy()
-        y_np = int(y_batch.numpy())
-        y_true_test.append(y_np)
-
-        # Time only the invoke() (keep set_tensor inside infer_prob).
-        # We'll re-run inference here to record time consistently.
-        x_float = np.asarray(x_np, dtype=np.float32)
-        x_q = np.round(x_float / input_scale) + input_zp
-        x_q = np.clip(x_q, qmin, qmax).astype(input_dtype)
-        x_q = x_q[None, ...]
-
-        interpreter.set_tensor(input_index, x_q)
+    def run(x: np.ndarray) -> tuple[float, float]:
+        x_q = np.clip(np.round(x / in_scale) + in_zp, qmin, qmax).astype(inp["dtype"])
+        interpreter.set_tensor(inp["index"], x_q[None, ...])
         t0 = time.perf_counter()
         interpreter.invoke()
-        t1 = time.perf_counter()
-        infer_times_s.append(t1 - t0)
-
-        out_int = interpreter.get_tensor(output_index)
-        out_int = np.asarray(out_int)
-        out_deq = (out_int.astype(np.float32) - float(output_zp)) * float(output_scale)
-        out_vec = out_deq.reshape(-1)
-
-        if out_vec.size == 1:
-            z = float(out_vec[0])
-            prob = float(1.0 / (1.0 + np.exp(-z)))
-        elif out_vec.size == 2:
-            logits = out_vec.astype(np.float32)
-            logits = logits - np.max(logits)
-            e = np.exp(logits)
-            probs = e / np.sum(e)
-            prob = float(probs[1])
+        elapsed = time.perf_counter() - t0
+        raw = (
+            (interpreter.get_tensor(out["index"]).astype(np.float32) - out_zp)
+            * out_scale
+        ).reshape(-1)
+        if raw.size == 1:
+            prob = float(1.0 / (1.0 + np.exp(-raw[0])))
         else:
-            raise ValueError(f"Unexpected output size: {out_vec.size}")
+            e = np.exp(raw - raw.max())
+            prob = float(e[1] / e.sum())
+        return prob, elapsed
 
-        y_score_test.append(prob)
+    def collect(ds: tf.data.Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        y_true, y_score, times = [], [], []
+        for x_batch, y_batch in ds.unbatch():
+            prob, elapsed = run(x_batch.numpy())
+            y_true.append(int(y_batch.numpy()))
+            y_score.append(prob)
+            times.append(elapsed)
+        return np.asarray(y_true), np.asarray(y_score), np.asarray(times)
 
-    y_true_test_arr = np.asarray(y_true_test, dtype=np.int32)
-    y_score_test_arr = np.asarray(y_score_test, dtype=np.float32)
+    y_train, s_train, _ = collect(train_dataset)
+    y_test, s_test, times_test = collect(test_dataset)
 
-    acc_test, prec_test, rec_test, f2_test = metrics_at_threshold(
-        y_true_test_arr, y_score_test_arr, best_thr
+    # Best F2 threshold from train precision-recall curve
+    prec_c, rec_c, thr_c = precision_recall_curve(y_train, s_train)
+    denom = 4 * prec_c[:-1] + rec_c[:-1]
+    f2_c = np.where(denom > 0, 5 * prec_c[:-1] * rec_c[:-1] / denom, 0.0)
+    best_thr = float(thr_c[np.argmax(f2_c)])
+
+    # ROC + AUC on train set
+    fpr, tpr, roc_thr = roc_curve(y_train, s_train)
+    auc = float(roc_auc_score(y_train, s_train))
+
+    y_pred_tr = (s_train >= best_thr).astype(int)
+    train_metrics = EvalMetrics(
+        threshold=best_thr,
+        accuracy=float(accuracy_score(y_train, y_pred_tr)),
+        precision=float(precision_score(y_train, y_pred_tr, zero_division=0)),
+        recall=float(recall_score(y_train, y_pred_tr, zero_division=0)),
+        f2=float(fbeta_score(y_train, y_pred_tr, beta=2, zero_division=0)),
+        auc=auc,
+        roc_fpr=fpr,
+        roc_tpr=tpr,
+        roc_thresholds=roc_thr,
     )
-    avg_inference_time_ms = (
-        float(np.mean(infer_times_s) * 1000.0) if infer_times_s else 0.0
-    )
+
+    y_pred_test = (s_test >= best_thr).astype(int)
+    avg_ms = float(np.mean(times_test) * 1000.0)
     test_metrics = EvalMetrics(
         threshold=best_thr,
-        accuracy=acc_test,
-        precision=prec_test,
-        recall=rec_test,
-        f2=f2_test,
-        auc=None,
-        roc_fpr=None,
-        roc_tpr=None,
-        roc_thresholds=None,
-        avg_inference_time_ms=avg_inference_time_ms,
+        accuracy=float(accuracy_score(y_test, y_pred_test)),
+        precision=float(precision_score(y_test, y_pred_test, zero_division=0)),
+        recall=float(recall_score(y_test, y_pred_test, zero_division=0)),
+        f2=float(fbeta_score(y_test, y_pred_test, beta=2, zero_division=0)),
+        avg_inference_time_ms=avg_ms,
     )
-
-    from datetime import datetime, timezone
 
     record = TFLiteEvalRecord(
         model_name=model_name,
@@ -897,55 +611,11 @@ def evaluate_tflite_model(
         train=train_metrics,
         test=test_metrics,
     )
-    with results_path.open("a", encoding="utf-8") as f:
+    with (results_dir / f"{model_name}.jsonl").open("a", encoding="utf-8") as f:
         f.write(record.model_dump_json() + "\n")
 
-    return train_metrics, test_metrics, avg_inference_time_ms
-
-
-def _metrics_to_dict(m: EvalMetrics) -> dict:
-    d = m.model_dump()
-    for key in ("roc_fpr", "roc_tpr", "roc_thresholds"):
-        if d[key] is not None:
-            d[key] = d[key].tolist()
-    return d
-
-
-def _dict_to_metrics(d: dict) -> EvalMetrics:
-    for key in ("roc_fpr", "roc_tpr", "roc_thresholds"):
-        if d[key] is not None:
-            d[key] = np.array(d[key])
-    return EvalMetrics(**d)
-
-
-def load_results(
-    results_path: Path,
-) -> dict[tuple[int, int, int, int], tuple[EvalMetrics, EvalMetrics]]:
-    cache: dict[tuple[int, int, int, int], tuple[EvalMetrics, EvalMetrics]] = {}
-    if not results_path.exists():
-        return cache
-    with results_path.open() as f:
-        for line in f:
-            row = json.loads(line)
-            key = tuple(row["params"])
-            cache[key] = (_dict_to_metrics(row["train"]), _dict_to_metrics(row["test"]))
-    return cache
-
-
-def save_result(
-    results_path: Path,
-    params: tuple[int, int, int, int],
-    train_m: EvalMetrics,
-    test_m: EvalMetrics,
-) -> None:
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    row = {
-        "params": list(params),
-        "train": _metrics_to_dict(train_m),
-        "test": _metrics_to_dict(test_m),
-    }
-    with results_path.open("a") as f:
-        f.write(json.dumps(row) + "\n")
+    display_eval_metrics(train_metrics, test_metrics)
+    return train_metrics, test_metrics, avg_ms
 
 
 # TFLite export helpers
@@ -953,15 +623,18 @@ def save_result(
 
 def build_representative_batches(
     dataset: tf.data.Dataset,
-    target_len: int,
     take: int = 100,
 ) -> List[np.ndarray]:
-    """Collect a small set of representative samples for quantization."""
+    """Collect a small set of representative samples for quantization.
+
+    Works for any input shape (time-domain or mel spectrogram): adds a batch
+    dimension without reshaping, so the sample shape matches the model input.
+    """
 
     batches: List[np.ndarray] = []
     for x_batch, _ in dataset.unbatch().take(take):
         sample = x_batch.numpy().astype(np.float32)
-        sample = np.reshape(sample, (1, target_len, 1))
+        sample = sample[None, ...]  # add batch dim: [...] -> [1, ...]
         batches.append(sample)
     return batches
 
