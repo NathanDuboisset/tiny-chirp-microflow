@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 import os
 import random
 import time
 import wandb
-from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 import json
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer, field_validator
 
 if TYPE_CHECKING:
     import keras
@@ -441,6 +441,37 @@ class EvalMetrics(BaseModel):
     roc_fpr: np.ndarray | None = None
     roc_tpr: np.ndarray | None = None
     roc_thresholds: np.ndarray | None = None
+    avg_inference_time_ms: float | None = None
+
+    # Make roc arrays JSON serializable (lists) and accept lists back on load.
+    @field_serializer("roc_fpr", "roc_tpr", "roc_thresholds", when_used="json")
+    def _serialize_roc_arrays(self, v: np.ndarray | None):
+        if v is None:
+            return None
+        return v.tolist()
+
+    @field_validator("roc_fpr", "roc_tpr", "roc_thresholds", mode="before")
+    @classmethod
+    def _coerce_roc_arrays(cls, v: Any):
+        if v is None:
+            return None
+        return np.asarray(v, dtype=float)
+
+    @field_validator("avg_inference_time_ms", mode="before")
+    @classmethod
+    def _coerce_avg_inference_time(cls, v: Any):
+        if v is None:
+            return None
+        return float(v)
+
+
+class TFLiteEvalRecord(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    model_name: str
+    timestamp: str
+    train: EvalMetrics
+    test: EvalMetrics
 
 
 def evaluate_binary_classifier(
@@ -637,6 +668,241 @@ def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) 
     plt.show()
 
 
+def evaluate_tflite_model(
+    tflite_path: Path,
+    model_name: str,
+    train_dataset: tf.data.Dataset,
+    test_dataset: tf.data.Dataset,
+    results_dir: Path | None = None,
+) -> tuple[EvalMetrics, EvalMetrics, float]:
+    """Evaluate an INT8-quantized TFLite model with a train-chosen best F2 threshold."""
+
+    if results_dir is None:
+        results_dir = REPO_ROOT / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    tflite_path = Path(tflite_path)
+    if not tflite_path.exists():
+        raise FileNotFoundError(str(tflite_path))
+
+    results_path = results_dir / f"{model_name}.jsonl"
+
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
+    interpreter.allocate_tensors()
+
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    if len(input_details) != 1 or len(output_details) < 1:
+        raise ValueError(
+            "Expected exactly one input tensor and at least one output tensor."
+        )
+
+    input_info = input_details[0]
+    output_info = output_details[0]
+
+    input_index = input_info["index"]
+    output_index = output_info["index"]
+    input_dtype = input_info["dtype"]
+    input_scale, input_zp = input_info["quantization"]
+    output_scale, output_zp = output_info["quantization"]
+
+    if input_scale == 0 or output_scale == 0:
+        raise ValueError("TFLite quantization scale is 0; cannot quantize/dequantize.")
+
+    if input_dtype == np.int8:
+        qmin, qmax = -128, 127
+    elif input_dtype == np.uint8:
+        qmin, qmax = 0, 255
+    else:
+        raise ValueError(f"Unsupported input dtype for evaluation: {input_dtype}")
+
+    def infer_prob(x_sample: np.ndarray) -> float:
+        x_float = np.asarray(x_sample, dtype=np.float32)
+        x_q = np.round(x_float / input_scale) + input_zp
+        x_q = np.clip(x_q, qmin, qmax).astype(input_dtype)
+        x_q = x_q[None, ...]  # add batch dim
+
+        interpreter.set_tensor(input_index, x_q)
+        interpreter.invoke()
+
+        out_int = interpreter.get_tensor(output_index)
+        out_int = np.asarray(out_int)
+        out_deq = (out_int.astype(np.float32) - float(output_zp)) * float(output_scale)
+        out_vec = out_deq.reshape(-1)
+
+        if out_vec.size == 1:
+            # Sigmoid logit/prob.
+            z = float(out_vec[0])
+            return float(1.0 / (1.0 + np.exp(-z)))
+        if out_vec.size == 2:
+            # Softmax over 2 logits/probs; take class-1 prob.
+            logits = out_vec.astype(np.float32)
+            logits = logits - np.max(logits)  # stable softmax
+            e = np.exp(logits)
+            probs = e / np.sum(e)
+            return float(probs[1])
+        raise ValueError(f"Unexpected output size: {out_vec.size}")
+
+    def metrics_at_threshold(
+        y_true: np.ndarray, y_score: np.ndarray, thr: float
+    ) -> tuple[float, float, float, float]:
+        y_pred = (y_score >= thr).astype(np.int32)
+        tp = int(np.sum((y_true == 1) & (y_pred == 1)))
+        tn = int(np.sum((y_true == 0) & (y_pred == 0)))
+        fp = int(np.sum((y_true == 0) & (y_pred == 1)))
+        fn = int(np.sum((y_true == 1) & (y_pred == 0)))
+
+        total = tp + tn + fp + fn
+        accuracy = (tp + tn) / total if total > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+        beta = 2.0
+        denom = (beta * beta) * precision + recall
+        f2 = (1.0 + beta * beta) * precision * recall / denom if denom > 0 else 0.0
+        return float(accuracy), float(precision), float(recall), float(f2)
+
+    # ---------------- Train pass: scores + ROC + best F2 threshold ----------------
+    y_true_train: list[int] = []
+    y_score_train: list[float] = []
+    for x_batch, y_batch in train_dataset.unbatch():
+        x_np = x_batch.numpy()
+        y_np = int(y_batch.numpy())
+        y_true_train.append(y_np)
+        y_score_train.append(infer_prob(x_np))
+
+    y_true_train_arr = np.asarray(y_true_train, dtype=np.int32)
+    y_score_train_arr = np.asarray(y_score_train, dtype=np.float32)
+
+    best_thr = 0.5
+    best_f2 = -1.0
+    for thr in np.unique(y_score_train_arr):
+        _, _, _, f2_thr = metrics_at_threshold(
+            y_true_train_arr, y_score_train_arr, float(thr)
+        )
+        if f2_thr > best_f2:
+            best_f2 = f2_thr
+            best_thr = float(thr)
+
+    # ROC on training set (for plotting).
+    order = np.argsort(-y_score_train_arr)
+    y_true_sorted = y_true_train_arr[order]
+    y_score_sorted = y_score_train_arr[order]
+    thresholds_arr = np.r_[np.inf, np.unique(y_score_sorted)[::-1], -np.inf]
+
+    tpr_list: list[float] = []
+    fpr_list: list[float] = []
+    P = int(np.sum(y_true_sorted == 1))
+    N = int(np.sum(y_true_sorted == 0))
+    for thr in thresholds_arr:
+        y_pred_thr = (y_score_sorted >= float(thr)).astype(np.int32)
+        tp_thr = int(np.sum((y_true_sorted == 1) & (y_pred_thr == 1)))
+        fp_thr = int(np.sum((y_true_sorted == 0) & (y_pred_thr == 1)))
+        tpr_list.append(tp_thr / P if P > 0 else 0.0)
+        fpr_list.append(fp_thr / N if N > 0 else 0.0)
+
+    fpr_arr = np.asarray(fpr_list, dtype=np.float32)
+    tpr_arr = np.asarray(tpr_list, dtype=np.float32)
+    thresholds_ordered = np.asarray(thresholds_arr, dtype=np.float32)
+
+    order_roc = np.argsort(fpr_arr)
+    fpr_arr = fpr_arr[order_roc]
+    tpr_arr = tpr_arr[order_roc]
+    thresholds_ordered = thresholds_ordered[order_roc]
+    auc = float(np.trapz(tpr_arr, fpr_arr))
+
+    acc_train, prec_train, rec_train, f2_train = metrics_at_threshold(
+        y_true_train_arr, y_score_train_arr, best_thr
+    )
+    train_metrics = EvalMetrics(
+        threshold=best_thr,
+        accuracy=acc_train,
+        precision=prec_train,
+        recall=rec_train,
+        f2=f2_train,
+        auc=auc,
+        roc_fpr=fpr_arr,
+        roc_tpr=tpr_arr,
+        roc_thresholds=thresholds_ordered,
+    )
+
+    # ---------------- Test pass: metrics at best_thr + avg inference time ----------------
+    y_true_test: list[int] = []
+    y_score_test: list[float] = []
+    infer_times_s: list[float] = []
+    for x_batch, y_batch in test_dataset.unbatch():
+        x_np = x_batch.numpy()
+        y_np = int(y_batch.numpy())
+        y_true_test.append(y_np)
+
+        # Time only the invoke() (keep set_tensor inside infer_prob).
+        # We'll re-run inference here to record time consistently.
+        x_float = np.asarray(x_np, dtype=np.float32)
+        x_q = np.round(x_float / input_scale) + input_zp
+        x_q = np.clip(x_q, qmin, qmax).astype(input_dtype)
+        x_q = x_q[None, ...]
+
+        interpreter.set_tensor(input_index, x_q)
+        t0 = time.perf_counter()
+        interpreter.invoke()
+        t1 = time.perf_counter()
+        infer_times_s.append(t1 - t0)
+
+        out_int = interpreter.get_tensor(output_index)
+        out_int = np.asarray(out_int)
+        out_deq = (out_int.astype(np.float32) - float(output_zp)) * float(output_scale)
+        out_vec = out_deq.reshape(-1)
+
+        if out_vec.size == 1:
+            z = float(out_vec[0])
+            prob = float(1.0 / (1.0 + np.exp(-z)))
+        elif out_vec.size == 2:
+            logits = out_vec.astype(np.float32)
+            logits = logits - np.max(logits)
+            e = np.exp(logits)
+            probs = e / np.sum(e)
+            prob = float(probs[1])
+        else:
+            raise ValueError(f"Unexpected output size: {out_vec.size}")
+
+        y_score_test.append(prob)
+
+    y_true_test_arr = np.asarray(y_true_test, dtype=np.int32)
+    y_score_test_arr = np.asarray(y_score_test, dtype=np.float32)
+
+    acc_test, prec_test, rec_test, f2_test = metrics_at_threshold(
+        y_true_test_arr, y_score_test_arr, best_thr
+    )
+    avg_inference_time_ms = (
+        float(np.mean(infer_times_s) * 1000.0) if infer_times_s else 0.0
+    )
+    test_metrics = EvalMetrics(
+        threshold=best_thr,
+        accuracy=acc_test,
+        precision=prec_test,
+        recall=rec_test,
+        f2=f2_test,
+        auc=None,
+        roc_fpr=None,
+        roc_tpr=None,
+        roc_thresholds=None,
+        avg_inference_time_ms=avg_inference_time_ms,
+    )
+
+    from datetime import datetime, timezone
+
+    record = TFLiteEvalRecord(
+        model_name=model_name,
+        timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        train=train_metrics,
+        test=test_metrics,
+    )
+    with results_path.open("a", encoding="utf-8") as f:
+        f.write(record.model_dump_json() + "\n")
+
+    return train_metrics, test_metrics, avg_inference_time_ms
+
+
 def _metrics_to_dict(m: EvalMetrics) -> dict:
     d = m.model_dump()
     for key in ("roc_fpr", "roc_tpr", "roc_thresholds"):
@@ -712,34 +978,22 @@ def representative_dataset_from_batches(
     return gen
 
 
-def export_int8_tflite_from_saved_model(
-    saved_model_dir: str,
-    out_tflite: Path,
-    rep_batches: Iterable[np.ndarray],
-) -> None:
-    """Export an INT8 TFLite model from a SavedModel with representative data."""
-
-    converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_dir)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = representative_dataset_from_batches(rep_batches)
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.int8
-    converter.inference_output_type = tf.int8
-
-    tflite_bytes = converter.convert()
-    out_tflite.write_bytes(tflite_bytes)
-
-
 def export_keras_model_to_int8_tflite(
     model: keras.Model,
     rep_batches: Iterable[np.ndarray],
     out_tflite: Path,
     tmp_dir: str = "temp_saved_model",
 ) -> None:
-    """High-level helper that mirrors the export flow used in the notebooks."""
+    """Export a Keras model as an INT8-quantized TFLite flatbuffer."""
 
     model.export(tmp_dir)
-    export_int8_tflite_from_saved_model(tmp_dir, out_tflite, rep_batches)
+    converter = tf.lite.TFLiteConverter.from_saved_model(tmp_dir)
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    converter.representative_dataset = representative_dataset_from_batches(rep_batches)
+    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+    converter.inference_input_type = tf.int8
+    converter.inference_output_type = tf.int8
+    out_tflite.write_bytes(converter.convert())
 
 
 # Rust audio_sample.rs helpers
@@ -850,12 +1104,13 @@ class TimingCallback(tf.keras.callbacks.Callback):
         step_time = time.time() - self._train_start
 
         if batch % self.log_freq == 0:
-            wandb.log(
-                {
-                    "train/step_time": step_time,
-                    "train/samples_per_sec": self.batch_size / step_time,
-                }
-            )
+            if wandb is not None:
+                wandb.log(
+                    {
+                        "train/step_time": step_time,
+                        "train/samples_per_sec": self.batch_size / step_time,
+                    }
+                )
 
     def on_test_begin(self, logs=None):
         self._val_epoch_start = time.time()
@@ -870,7 +1125,6 @@ class TimingCallback(tf.keras.callbacks.Callback):
             if steps:
                 total = steps * self.batch_size
                 log_dict["val/samples_per_sec_epoch"] = total / val_time
-
         wandb.log(log_dict)
 
     def on_test_batch_begin(self, batch, logs=None):
