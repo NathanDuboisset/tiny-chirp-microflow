@@ -5,19 +5,28 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 import os
 import random
+from pydantic import BaseModel, field_serializer, field_validator
 import time
+
+# Suppress TF/CUDA noise — must happen before `import tensorflow`.
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")  # hide C++ INFO/WARNING/ERROR
+os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")  # disable oneDNN ops
+os.environ.setdefault("TF_XLA_FLAGS", "--tf_xla_auto_jit=0")
+
 import wandb
 
 import numpy as np
 import tensorflow as tf
-from pydantic import BaseModel, field_serializer, field_validator
+
+tf.get_logger().setLevel("ERROR")  # hide Python-level TF INFO/WARNING
+
 
 if TYPE_CHECKING:
     import keras
 else:
     keras = tf.keras
 
-from tensorflow.python.framework.convert_to_constants import (
+from tensorflow.python.framework.convert_to_constants import (  # noqa: E402
     convert_variables_to_constants_v2_as_graph,
 )
 
@@ -36,27 +45,18 @@ def set_global_seed(seed: int = SEED) -> None:
 
 
 def configure_tf_runtime() -> None:
-    """Configure TensorFlow runtime flags and GPU memory growth."""
-
-    # Disable XLA / JIT and oneDNN for deterministic, CPU-only behaviour
-    os.environ.setdefault("TF_XLA_FLAGS", "--tf_xla_auto_jit=0")
-    os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-    os.environ.setdefault("TF_FORCE_GPU_ALLOW_GROWTH", "true")
-
-    # Limit GPU memory growth if GPUs are available (mirrors cnn_time.ipynb)
-    gpus = tf.config.list_physical_devices("GPU")
-    if gpus:
-        for gpu in gpus:
-            try:
-                tf.config.experimental.set_memory_growth(gpu, True)
-            except Exception:
-                # Best-effort; don't crash if this fails on some platforms.
-                pass
+    """Enable GPU memory growth (call once before building any model)."""
+    for gpu in tf.config.list_physical_devices("GPU"):
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except Exception:
+            pass
 
 
 # Repository paths
 REPO_ROOT = Path.cwd().parent
 MODELS_DIR = REPO_ROOT / "models"
+CHECKPOINT_DIR = MODELS_DIR / "checkpoints"
 SRC_DIR = REPO_ROOT / "src"
 DATASET_ROOT = REPO_ROOT / "dataset"
 
@@ -469,6 +469,9 @@ class TFLiteEvalRecord(BaseModel):
     timestamp: str
     train: EvalMetrics
     test: EvalMetrics
+    model_size_kb: float | None = None
+    flops_mflops: float | None = None
+    arena_size_kb: float | None = None
 
 
 def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) -> None:
@@ -605,11 +608,50 @@ def evaluate_tflite_model(
         avg_inference_time_ms=avg_ms,
     )
 
+    import io as _io
+    import contextlib as _ctx
+    import re as _re
+
+    # Capture Analyzer output for both model size and arena estimation
+    buf = _io.StringIO()
+    with _ctx.redirect_stdout(buf):
+        tf.lite.experimental.Analyzer.analyze(model_path=str(tflite_path))
+    analyzer_output = buf.getvalue()
+
+    # Flash: weight data only (INT8 weights + INT32 biases), excluding flatbuffer overhead
+    m_data = _re.search(r"Total data buffer size:\s*(\d+)\s*bytes", analyzer_output)
+    model_size_kb = int(m_data.group(1)) / 1024.0 if m_data else tflite_path.stat().st_size / 1024.0
+
+    # RAM: sum all activation tensors (shape_signature = dynamic batch dim → runtime-allocated)
+    _dtype_bytes = {"INT8": 1, "UINT8": 1, "INT16": 2, "INT32": 4, "FLOAT32": 4}
+    activation_total = 0
+    for line in analyzer_output.splitlines():
+        sig_m = _re.search(r"shape_signature:\[([-\d,\s]+)\],\s*type:(\w+)", line)
+        if sig_m:
+            dims = [max(1, int(d)) for d in sig_m.group(1).split(",")]
+            activation_total += int(np.prod(dims)) * _dtype_bytes.get(sig_m.group(2), 1)
+    arena_size_kb = activation_total / 1024.0 if activation_total > 0 else None
+
+    # MFLOPs estimate: sum shape products of all 4-D tensors (conv weights / activations)
+    flops_mflops = sum(
+        float(np.prod(t["shape"])) / 1e6
+        for t in interpreter.get_tensor_details()
+        if len(t["shape"]) == 4
+    )
+
+    print(f"Model size : {model_size_kb:.1f} KB")
+    print(f"Est. MFLOPs: {flops_mflops:.3f}")
+    if arena_size_kb is not None:
+        print(f"Arena size : {arena_size_kb:.1f} KB")
+
     record = TFLiteEvalRecord(
         model_name=model_name,
         timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
         train=train_metrics,
         test=test_metrics,
+        model_size_kb=model_size_kb,
+        flops_mflops=flops_mflops,
+        arena_size_kb=arena_size_kb,
     )
     with (results_dir / f"{model_name}.jsonl").open("a", encoding="utf-8") as f:
         f.write(record.model_dump_json() + "\n")
@@ -824,7 +866,7 @@ def get_callbacks(
 
     callbacks = []
     callbacks.append(WandbMetricsLogger(log_freq=log_freq))
-    callbacks.append(WandbModelCheckpoint("models.keras"))
+    callbacks.append(WandbModelCheckpoint(str(CHECKPOINT_DIR / "checkpoint.keras")))
     callbacks.append(TimingCallback(batch_size=batch_size, log_freq=log_freq))
     if patience is not None:
         callbacks.append(

@@ -17,3 +17,4 @@ src/audio_sample.rs
 building_tensorflow/results/
 *.env
 /building_tensorflow/wandb
+/models/checkpoints
