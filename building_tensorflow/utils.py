@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, List, Tuple, TYPE_CHECKING, cast
 import os
 import random
+import tempfile
 from pydantic import BaseModel, field_serializer, field_validator
 import time
 
@@ -620,7 +621,9 @@ def evaluate_tflite_model(
 
     # Flash: weight data only (INT8 weights + INT32 biases), excluding flatbuffer overhead
     m_data = _re.search(r"Total data buffer size:\s*(\d+)\s*bytes", analyzer_output)
-    model_size_kb = int(m_data.group(1)) / 1024.0 if m_data else tflite_path.stat().st_size / 1024.0
+    model_size_kb = (
+        int(m_data.group(1)) / 1024.0 if m_data else tflite_path.stat().st_size / 1024.0
+    )
 
     # RAM: sum all activation tensors (shape_signature = dynamic batch dim → runtime-allocated)
     _dtype_bytes = {"INT8": 1, "UINT8": 1, "INT16": 2, "INT32": 4, "FLOAT32": 4}
@@ -697,18 +700,29 @@ def export_keras_model_to_int8_tflite(
     model: keras.Model,
     rep_batches: Iterable[np.ndarray],
     out_tflite: Path,
-    tmp_dir: str = "temp_saved_model",
 ) -> None:
-    """Export a Keras model as an INT8-quantized TFLite flatbuffer."""
+    """Export a Keras model as an INT8-quantized TFLite flatbuffer.
 
-    model.export(tmp_dir)
-    converter = tf.lite.TFLiteConverter.from_saved_model(tmp_dir)
-    converter.optimizations = [tf.lite.Optimize.DEFAULT]
-    converter.representative_dataset = representative_dataset_from_batches(rep_batches)
-    converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-    converter.inference_input_type = tf.int8
-    converter.inference_output_type = tf.int8
-    out_tflite.write_bytes(converter.convert())
+    model.export() with the default dynamic batch size emits SHAPE/Reshape ops
+    to compute output shapes at runtime.  Passing a fixed batch size of 1 via
+    input_signature makes all tensor shapes statically known at trace time, so
+    no extra ops are inserted.
+    """
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        input_signature = [
+            tf.TensorSpec(shape=[1] + list(model.input_shape[1:]), dtype=tf.float32)
+        ]
+        model.export(tmp_dir, input_signature=input_signature)
+
+        converter = tf.lite.TFLiteConverter.from_saved_model(tmp_dir)
+        converter.optimizations = [tf.lite.Optimize.DEFAULT]
+        converter.representative_dataset = representative_dataset_from_batches(
+            rep_batches
+        )
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
+        converter.inference_input_type = tf.int8
+        converter.inference_output_type = tf.int8
+        out_tflite.write_bytes(converter.convert())
 
 
 # Rust audio_sample.rs helpers
