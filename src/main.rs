@@ -55,17 +55,17 @@ async fn main() {
         audio_sample::SAMPLE_RATE,
         audio_sample::TEST_CLIPS.len()
     );
+
+    info!("Starting inference");
     info!("clip | expected   | predicted  | score0 | score1");
 
-    let mut i = 0usize;
-    while i < audio_sample::TEST_CLIPS.len() {
-        let start_time = Instant::now().as_micros();
-        let clip = &audio_sample::TEST_CLIPS[i];
-
+    for (i, clip) in audio_sample::TEST_CLIPS.iter().enumerate() {
         #[cfg(feature = "mel")]
         let input = spectrogram::compute(clip.audio);
         #[cfg(feature = "time")]
         let input = audio_raw::prepare(clip.audio);
+
+        let start_time = Instant::now().as_micros();
 
         let prediction = BirdModel::predict(input);
 
@@ -97,7 +97,6 @@ async fn main() {
             prediction[(0, 1)],
             duration
         );
-        i += 1;
     }
     exit(ExitCode::SUCCESS);
 }

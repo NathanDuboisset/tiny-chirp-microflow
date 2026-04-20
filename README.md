@@ -35,13 +35,13 @@ This builds the firmware, runs the TinyChirp model on test clips and prints pred
 Binary path after build:
 
 ```text
-build/bin/{your-board-ariel-id}/cargo/thumbv8m.main-none-eabihf/release/tiny-chrip-microflow
+build/bin/{your-board-ariel-id}/cargo/thumbv8m.main-none-eabihf/release/tiny-chirp-microflow
 ```
 
 Example:
 
 ```bash
-runtime_file_path=build/bin/{your-board-ariel-id}/cargo/thumbv8m.main-none-eabihf/release/tiny-chrip-microflow
+runtime_file_path=build/bin/{your-board-ariel-id}/cargo/thumbv8m.main-none-eabihf/release/tiny-chirp-microflow
 
 arm-none-eabi-size "$runtime_file_path"
 nm --print-size --size-sort --demangle=rust --radix=d "$runtime_file_path"
