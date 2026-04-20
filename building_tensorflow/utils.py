@@ -701,13 +701,7 @@ def export_keras_model_to_int8_tflite(
     rep_batches: Iterable[np.ndarray],
     out_tflite: Path,
 ) -> None:
-    """Export a Keras model as an INT8-quantized TFLite flatbuffer.
-
-    model.export() with the default dynamic batch size emits SHAPE/Reshape ops
-    to compute output shapes at runtime.  Passing a fixed batch size of 1 via
-    input_signature makes all tensor shapes statically known at trace time, so
-    no extra ops are inserted.
-    """
+    """Export a Keras model as an INT8-quantized TFLite flatbuffer."""
     with tempfile.TemporaryDirectory() as tmp_dir:
         input_signature = [
             tf.TensorSpec(shape=[1] + list(model.input_shape[1:]), dtype=tf.float32)

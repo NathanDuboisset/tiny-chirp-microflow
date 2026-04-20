@@ -9,33 +9,47 @@ mod audio_sample;
 mod spectrogram;
 mod audio_raw;
 
-#[cfg(all(feature = "cnn_mel", feature = "tf"))]
+#[cfg(all(feature = "mel", feature = "cnn_tf"))]
 #[model("models/cnn_mel_tf.tflite")]
 struct BirdModel;
 
-#[cfg(all(feature = "cnn_mel", feature = "torch"))]
+#[cfg(all(feature = "mel", feature = "cnn_torch"))]
 #[model("models/cnn_mel_torch.tflite")]
 struct BirdModel;
 
-#[cfg(all(feature = "cnn_time", feature = "tf"))]
+#[cfg(all(feature = "time", feature = "cnn_tf"))]
 #[model("models/cnn_time_tf.tflite")]
 struct BirdModel;
 
-#[cfg(all(feature = "sincnet_time", feature = "tf"))]
-#[model("models/sincnet_time_tf.tflite")]
+#[cfg(all(feature = "time", feature = "sincnet_tf"))]
+#[model("models/sincnet_tf.tflite")]
+struct BirdModel;
+
+#[cfg(all(feature = "time", feature = "sincnet_real_tf"))]
+#[model("models/sincnet_real_tf.tflite")]
+struct BirdModel;
+
+#[cfg(all(feature = "time", feature = "sincnet_real_multilayer_tf"))]
+#[model("models/sincnet_real_multilayer_tf.tflite")]
 struct BirdModel;
 
 #[ariel_os::task(autostart)]
 async fn main() {
     info!("tiny-chirp-microflow on {}.", ariel_os::buildinfo::BOARD);
-    #[cfg(feature = "cnn_mel")]
-    info!("Model: cnn on mel spectrogram");
-    #[cfg(feature = "cnn_time")]
-    info!("Model: cnn on time domain");
-    #[cfg(feature = "torch")]
-    info!("Using torch produced models");
-    #[cfg(feature = "tf")]
-    info!("Using tensorflow produced models");
+    #[cfg(feature = "mel")]
+    info!("Input: mel spectrogram");
+    #[cfg(feature = "time")]
+    info!("Input: time domain");
+    #[cfg(feature = "cnn_tf")]
+    info!("Model: cnn (tensorflow)");
+    #[cfg(feature = "cnn_torch")]
+    info!("Model: cnn (torch)");
+    #[cfg(feature = "sincnet_tf")]
+    info!("Model: sincnet (tensorflow)");
+    #[cfg(feature = "sincnet_real_tf")]
+    info!("Model: sincnet_real (tensorflow)");
+    #[cfg(feature = "sincnet_real_multilayer_tf")]
+    info!("Model: sincnet_real_multilayer (tensorflow)");
     info!(
         "Audio sample rate: {} Hz, clips={}",
         audio_sample::SAMPLE_RATE,
@@ -48,9 +62,9 @@ async fn main() {
         let start_time = Instant::now().as_micros();
         let clip = &audio_sample::TEST_CLIPS[i];
 
-        #[cfg(feature = "cnn_mel")]
+        #[cfg(feature = "mel")]
         let input = spectrogram::compute(clip.audio);
-        #[cfg(any(feature = "cnn_time", feature = "sincnet_time"))]
+        #[cfg(feature = "time")]
         let input = audio_raw::prepare(clip.audio);
 
         let prediction = BirdModel::predict(input);

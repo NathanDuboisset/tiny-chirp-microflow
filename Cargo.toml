@@ -12,14 +12,18 @@ libm = { version = "0.2", default-features = false }
 nalgebra = { version = "0.32", default-features = false }
 
 [features]
-default = ["cnn_mel", "tf"]
+default = []
 
-cnn_mel = []
-cnn_time = []
-sincnet_time = []
+# Input type
+mel = []
+time = []
 
-tf = []
-torch = []
+# Model
+cnn_tf = []
+cnn_torch = []
+sincnet_tf = []
+sincnet_real_tf = []
+sincnet_real_multilayer_tf = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
