@@ -11,4 +11,4 @@ apps:
     env:
       global:
         executor_stacksize_required:
-          - "512000"
+          - "256000"

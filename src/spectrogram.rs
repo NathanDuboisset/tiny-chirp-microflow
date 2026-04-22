@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use libm::{cosf, log10f, logf, powf, sqrtf};
 use microflow::buffer::Buffer4D;
 use nalgebra::SMatrix;

@@ -785,7 +785,6 @@ def write_audio_sample_rs(
     rs.append(f"pub const SAMPLE_RATE: usize = {sample_rate};\n\n")
     rs.append("pub struct TestClip {\n")
     rs.append("    pub expected_label: &'static str,\n")
-    rs.append("    pub source_file: &'static str,\n")
     rs.append("    pub audio: &'static [f32],\n")
     rs.append("}\n\n")
 
@@ -797,7 +796,6 @@ def write_audio_sample_rs(
     for i, (label, _audio, rel_path) in enumerate(clips, 1):
         rs.append("    TestClip {\n")
         rs.append(f'        expected_label: "{label}",\n')
-        rs.append(f'        source_file: "{rel_path}",\n')
         rs.append(f"        audio: CLIP_{i},\n")
         rs.append("    },\n")
     rs.append("];\n")
