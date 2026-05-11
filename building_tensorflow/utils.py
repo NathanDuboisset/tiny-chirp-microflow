@@ -440,6 +440,7 @@ class EvalMetrics(BaseModel):
     roc_tpr: np.ndarray | None = None
     roc_thresholds: np.ndarray | None = None
     avg_inference_time_ms: float | None = None
+    avg_preprocessing_ms: float | None = None
 
     # Make roc arrays JSON serializable (lists) and accept lists back on load.
     @field_serializer("roc_fpr", "roc_tpr", "roc_thresholds", when_used="json")
@@ -455,9 +456,9 @@ class EvalMetrics(BaseModel):
             return None
         return np.asarray(v, dtype=float)
 
-    @field_validator("avg_inference_time_ms", mode="before")
+    @field_validator("avg_inference_time_ms", "avg_preprocessing_ms", mode="before")
     @classmethod
-    def _coerce_avg_inference_time(cls, v: Any):
+    def _coerce_time_ms(cls, v: Any):
         if v is None:
             return None
         return float(v)
@@ -473,6 +474,8 @@ class TFLiteEvalRecord(BaseModel):
     model_size_kb: float | None = None
     flops_mflops: float | None = None
     arena_size_kb: float | None = None
+    hyperparams: dict[str, Any] | None = None
+    preprocessing_ms: float | None = None
 
 
 def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) -> None:
@@ -509,12 +512,44 @@ def display_eval_metrics(train_metrics: EvalMetrics, test_metrics: EvalMetrics) 
     plt.show()
 
 
+def benchmark_preprocessing(
+    preprocess_fn: Callable[[tf.Tensor], Any],
+    raw_dataset: tf.data.Dataset,
+    take: int = 50,
+    warmup: int = 5,
+) -> float:
+    """Return mean per-clip preprocessing time in milliseconds.
+
+    `raw_dataset` must yield (audio, label) with un-preprocessed audio (e.g. the
+    output of `make_audio_datasets`, before mel/length mapping). `preprocess_fn`
+    is called on each clip's audio with a leading batch dim; .numpy() forces eager
+    execution so the timer captures the real wall cost of STFT/mel/etc.
+    """
+    samples = []
+    for x_batch, _ in raw_dataset.unbatch().take(take + warmup):
+        x = tf.expand_dims(x_batch, 0)
+        samples.append(x)
+
+    times: list[float] = []
+    for i, x in enumerate(samples):
+        t0 = time.perf_counter()
+        out = preprocess_fn(x)
+        if isinstance(out, tf.Tensor):
+            _ = out.numpy()
+        elapsed = time.perf_counter() - t0
+        if i >= warmup:
+            times.append(elapsed)
+    return float(np.mean(times) * 1000.0) if times else 0.0
+
+
 def evaluate_tflite_model(
     tflite_path: Path,
     model_name: str,
     train_dataset: tf.data.Dataset,
     test_dataset: tf.data.Dataset,
     results_dir: Path | None = None,
+    hyperparams: dict[str, Any] | None = None,
+    preprocessing_ms: float | None = None,
 ) -> tuple[EvalMetrics, EvalMetrics, float]:
     """Evaluate an INT8-quantized TFLite model with a train-chosen best F2 threshold."""
     from datetime import datetime, timezone
@@ -546,9 +581,44 @@ def evaluate_tflite_model(
         raise ValueError("TFLite quantization scale is 0.")
     qmin, qmax = (-128, 127) if inp["dtype"] == np.int8 else (0, 255)
 
+    input_rank = len(inp["shape"])
+    sample_rank = input_rank - 1
+
+    def _adapt_sample_shape(x: np.ndarray) -> np.ndarray:
+        """Adapt tensors to model input rank while allowing 2D or 4D audio inputs."""
+        x = np.asarray(x)
+        if x.ndim == input_rank:
+            return x
+        if x.ndim == sample_rank:
+            return x
+
+        # Common waveform case: (time, 1) -> (time,) when model expects rank-1 sample.
+        if sample_rank == 1 and x.ndim == 2 and x.shape[-1] == 1:
+            return x.reshape(-1)
+
+        # Promote rank-1 waveform to rank-3 image-like tensor for Conv2D models.
+        if sample_rank == 3 and x.ndim == 1:
+            return x[:, None, None]
+        # Common Conv2D waveform case: (time, 1) -> (time, 1, 1).
+        if sample_rank == 3 and x.ndim == 2 and x.shape[-1] == 1:
+            return x[..., None]
+
+        raise ValueError(
+            f"Unsupported sample rank for TFLite input: got {x.ndim}, "
+            f"expected {sample_rank} before batching (input shape: {inp['shape']})."
+        )
+
     def run(x: np.ndarray) -> tuple[float, float]:
+        x = _adapt_sample_shape(x)
         x_q = np.clip(np.round(x / in_scale) + in_zp, qmin, qmax).astype(inp["dtype"])
-        interpreter.set_tensor(inp["index"], x_q[None, ...])
+        if x_q.ndim == sample_rank:
+            x_q = x_q[None, ...]
+        elif x_q.ndim != input_rank:
+            raise ValueError(
+                f"Unsupported tensor rank for TFLite input: got {x_q.ndim}, "
+                f"expected {sample_rank} (unbatched) or {input_rank} (batched)."
+            )
+        interpreter.set_tensor(inp["index"], x_q)
         t0 = time.perf_counter()
         interpreter.invoke()
         elapsed = time.perf_counter() - t0
@@ -607,6 +677,7 @@ def evaluate_tflite_model(
         recall=float(recall_score(y_test, y_pred_test, zero_division=0)),
         f2=float(fbeta_score(y_test, y_pred_test, beta=2, zero_division=0)),
         avg_inference_time_ms=avg_ms,
+        avg_preprocessing_ms=preprocessing_ms,
     )
 
     import io as _io
@@ -655,6 +726,8 @@ def evaluate_tflite_model(
         model_size_kb=model_size_kb,
         flops_mflops=flops_mflops,
         arena_size_kb=arena_size_kb,
+        hyperparams=hyperparams,
+        preprocessing_ms=preprocessing_ms,
     )
     with (results_dir / f"{model_name}.jsonl").open("a", encoding="utf-8") as f:
         f.write(record.model_dump_json() + "\n")
@@ -717,90 +790,6 @@ def export_keras_model_to_int8_tflite(
         converter.inference_input_type = tf.int8
         converter.inference_output_type = tf.int8
         out_tflite.write_bytes(converter.convert())
-
-
-# Rust audio_sample.rs helpers
-TestClip = Tuple[str, np.ndarray, str]
-
-
-def collect_test_clips_for_rs(
-    root: Path,
-    sample_rate: int,
-    target_len: int,
-    num_per_label: int = 2,
-) -> List[TestClip]:
-    """Collect a small, fixed set of test clips for Rust."""
-
-    raw_sample_ds = keras.utils.audio_dataset_from_directory(
-        root,
-        labels="inferred",
-        sampling_rate=sample_rate,
-        batch_size=1,
-        shuffle=False,
-    )
-
-    clips_by_label: dict[int, List[np.ndarray]] = {}
-    for audio_batch, label_batch in raw_sample_ds.unbatch():
-        label_idx = int(label_batch.numpy())
-        if label_idx not in clips_by_label:
-            clips_by_label[label_idx] = []
-        if len(clips_by_label[label_idx]) < num_per_label:
-            fixed = (
-                fix_audio_length_time(tf.expand_dims(audio_batch, 0))[0]
-                .numpy()
-                .astype(np.float32)
-            )
-            clips_by_label[label_idx].append(fixed)
-        if (
-            all(len(v) >= num_per_label for v in clips_by_label.values())
-            and len(clips_by_label) >= 2
-        ):
-            break
-
-    if len(clips_by_label) < 2:
-        raise RuntimeError("Expected at least two labels in testing dataset.")
-
-    # Assumes binary classification with labels 0 and 1, matching existing notebooks.
-    ordered: List[TestClip] = []
-    for i in range(num_per_label):
-        for label_idx in sorted(clips_by_label.keys()):
-            label_name = "target" if label_idx == 1 else "non_target"
-            audio = clips_by_label[label_idx][i]
-            rel_path = f"dataset/testing/{label_name}/sample_{i + 1}.wav"
-            ordered.append((label_name, audio, rel_path))
-
-    return ordered
-
-
-def write_audio_sample_rs(
-    out_path: Path,
-    clips: List[TestClip],
-    sample_rate: int,
-    generator_name: str = "building_tensorflow/cnn_time.ipynb",
-) -> None:
-    """Write a Rust audio_sample.rs file compatible with the TinyChirp runner."""
-
-    rs: List[str] = []
-    rs.append(f"// Generated by {generator_name}\n")
-    rs.append(f"pub const SAMPLE_RATE: usize = {sample_rate};\n\n")
-    rs.append("pub struct TestClip {\n")
-    rs.append("    pub expected_label: &'static str,\n")
-    rs.append("    pub audio: &'static [f32],\n")
-    rs.append("}\n\n")
-
-    for i, (_label, audio, _rel_path) in enumerate(clips, 1):
-        audio_vals = ", ".join(f"{float(v):.8f}" for v in audio)
-        rs.append(f"pub const CLIP_{i}: &[f32] = &[{audio_vals}];\n\n")
-
-    rs.append(f"pub const TEST_CLIPS: [TestClip; {len(clips)}] = [\n")
-    for i, (label, _audio, rel_path) in enumerate(clips, 1):
-        rs.append("    TestClip {\n")
-        rs.append(f'        expected_label: "{label}",\n')
-        rs.append(f"        audio: CLIP_{i},\n")
-        rs.append("    },\n")
-    rs.append("];\n")
-
-    out_path.write_text("".join(rs), encoding="utf-8")
 
 
 # W&B helpers

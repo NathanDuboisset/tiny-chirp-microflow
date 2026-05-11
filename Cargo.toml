@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 ariel-os = { path = "build/imports/ariel-os/src/ariel-os", features = ["time"] }
 ariel-os-boards = { path = "build/imports/ariel-os/src/ariel-os-boards" }
-microflow = { default-features = false, path = "../microflow-rs" }
+microflow = { default-features = false, path = "../microflow-rs", features = ["ariel-os"] }
 microfft = { version = "0.6", default-features = false, features = ["size-1024"] }
 libm = { version = "0.2", default-features = false }
 nalgebra = { version = "0.32", default-features = false }
@@ -22,8 +22,8 @@ time = []
 cnn_tf = []
 cnn_torch = []
 sincnet_tf = []
-sincnet_real_tf = []
-sincnet_real_multilayer_tf = []
+sincnet_multi_tf = []
+sincnet_mimic_mel_tf = []
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
