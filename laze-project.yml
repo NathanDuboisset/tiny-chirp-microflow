@@ -4,6 +4,44 @@ imports:
       tag: v0.4.0
     dldir: ariel-os
 
+# Selectable modules to pick the input pipeline and the model.
+# Use exactly one input module and exactly one model module, e.g.:
+#   laze build -b nrf5340dk-app -s input-time -s model-sincnet-multi run
+modules:
+  # --- Input domain ---
+  - name: input-mel
+    conflicts: [input-time]
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/mel]
+  - name: input-time
+    conflicts: [input-mel]
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/time]
+
+  # --- Model ---
+  - name: model-cnn-tf
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/cnn_tf]
+  - name: model-cnn-torch
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/cnn_torch]
+  - name: model-sincnet
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/sincnet_tf]
+  - name: model-sincnet-multi
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/sincnet_multi_tf]
+  - name: model-sincnet-mimic-mel
+    env:
+      global:
+        FEATURES: [tiny-chirp-microflow/sincnet_mimic_mel_tf]
+
 apps:
   - name: tiny-chirp-microflow
     selects:

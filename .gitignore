@@ -1,5 +1,6 @@
 /target
 /build
+/build_ncs
 .gdb_history
 **/*.egg-info/
 .ipynb_checkpoints/
@@ -21,3 +22,4 @@ building_tensorflow/results/
 
 audio_samples/
 recordings/
+/building/wandb/

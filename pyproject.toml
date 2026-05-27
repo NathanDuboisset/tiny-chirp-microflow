@@ -3,12 +3,11 @@ name = "tiny-chirp-microflow-building"
 version = "0.1.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-  "tensorflow[and-cuda]>=2.10",
+  "tensorflow[and-cuda]==2.19.0",
   "numpy",
   "librosa",
   "ipykernel",
   "jupyter",
-  "tensorflow-io[tensorflow]>=0.37.1",
   "keras>=3.13.2",
   "matplotlib>=3.10.8",
   "tqdm>=4.67.3",
@@ -17,6 +16,10 @@ dependencies = [
   "wandb>=0.25.1",
   "types-tensorflow>=2.18.0.20260408",
   "pandas>=3.0.2",
+  "tflite>=2.18.0",
+  "pyyaml>=6.0.3",
+  "cffi>=2.0.0",
+  "scikit-learn>=1.8.0",
 ]
 
 [build-system]
@@ -24,7 +27,7 @@ requires = ["hatchling>=1.27.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["."]
+packages = ["building"]
 
 [tool.uv.extra-build-dependencies]
 flopco-keras = ["pip"]
