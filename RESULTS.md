@@ -11,4 +11,9 @@ INT8-quantized TFLite models, evaluated on the test set. Threshold chosen for be
 | sincnet | 15.5 | TBD | 0.8528 | 0.6920 | 0.9956 | 0.9153 |
 | leaf | 23.2 | TBD | 0.5219 | 0.4063 | 0.9847 | 0.7665 |
 
-Sources: `results/<model>_tf.jsonl` (latest record per file).
+For reference scores, mel cnn tf model:
+for samples 0 to 3, for testing, 
+clip 0 : 1.8 / 2.9
+clip 1 : -3.9 / 12.4 
+clip 2 : 57.8 /-11.2
+clip 3 : -6.5 / 10.6

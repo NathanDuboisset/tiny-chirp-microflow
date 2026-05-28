@@ -39,13 +39,9 @@ predictions + latency over serial.
 
 #### nRF boards
 
-ariel-os v0.4.0 supports `nrf52840dk`, `nrf5340dk-app`, `nrf9151-dk`, etc.
-**The nRF54L family is not yet supported by ariel-os v0.4.0.** For a Cortex-M33
-target close to nRF54L, use `nrf5340dk-app` (512 KB RAM / 1 MB flash).
+ariel-os v0.4.0 supports `nrf52840dk`, `nrf5340dk-app`, `nrf9151-dk`, etc. No nRF54L support yet; `nrf5340dk-app` is the closest Cortex-M33 target (512 KB RAM / 1 MB flash).
 
-This crate depends on a forked `microflow` (sibling `../microflow-rs`) checked
-out on the `feat/streaming-and-timing` branch — it provides the `ariel-os`,
-streaming, and transpose features used by `#[model(...)]`.
+`microflow` is pinned to the sibling `../microflow-rs` checkout on branch `feat/streaming-and-timing` (adds the `ariel-os`, streaming, and transpose features used by `#[model(...)]`).
 
 ### Check RAM / Flash usage
 
@@ -66,13 +62,9 @@ nm --print-size --size-sort --demangle=rust --radix=d "$runtime_file_path"
 
 ## nRF54LM20B / Axon NPU (Zephyr / nRF Connect SDK)
 
-A second, separate firmware lives alongside the Rust code: a Zephyr app that
-runs `models/cnn_mel_tf.tflite` on the nRF54LM20B's Axon NPU. SincNet doesn't
-fit (filter > 16 taps, input width > line buffer); cnn_mel does.
+Second firmware, sitting next to the Rust code: a Zephyr app running `models/cnn_mel_tf.tflite` on the Axon NPU. SincNet doesn't fit (filter > 16 taps, input width > line buffer), cnn_mel does.
 
-The Zephyr app uses `CMakeLists.txt`, `prj.conf`, `boards/`, and its C sources
-in `src/` (alongside the Rust `*.rs` files — different file extensions, no
-collision). Builds go to `build_ncs/` to stay clear of laze's `build/`.
+C sources live in `src/` next to the `*.rs` files. Build dir is `build_ncs/` so it doesn't clash with laze's `build/`.
 
 ### Build & flash
 
@@ -82,17 +74,17 @@ nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west build -b nrf54lm20dk/nrf54lm20b/cpuapp -p auto -d build_ncs .'
 nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west flash -d build_ncs'
-picocom -b 115200 /dev/ttyACM0
+picocom -b 115200 /dev/ttyACM1
 ```
 
-In the nRF Connect for VS Code extension: open this repo at the root,
-**Add Build Configuration**, board `nrf54lm20dk/nrf54lm20b/cpuapp`,
-**Build directory** = `build_ncs`.
+The DK exposes two CDC-ACM ports. App VCOM is `ttyACM1`, `ttyACM0` is the J-Link channel (silent). Reset the board after opening picocom to catch the boot print.
+
+In nRF Connect for VS Code: open the repo root, Add Build Configuration, board `nrf54lm20dk/nrf54lm20b/cpuapp`, build directory `build_ncs`.
 
 ### Regenerate model / test input
 
 ```bash
-# from repo root, with .venv synced
-./scripts/compile.sh                                   # model -> src/generated/
-.venv/bin/python scripts/gen_mel_input.py --clip 1     # -> src/sample_input.[ch]
+./scripts/compile.sh   # cnn_mel_tf.tflite -> src/generated/nrf_axon_model_cnn_mel_.h
 ```
+
+`src/sample_input.[ch]` is written by `building/export_audio_sample_rs.ipynb` along with the rest of the audio sample files.
