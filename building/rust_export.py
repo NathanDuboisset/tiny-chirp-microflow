@@ -149,10 +149,22 @@ def write_sample_input_c(
     src_dir.mkdir(parents=True, exist_ok=True)
 
     (src_dir / "sample_input.h").write_text(
-        "#pragma once\n#include <stdint.h>\n#include <stddef.h>\n"
+        "#pragma once\n"
+        "#include <stdint.h>\n"
+        "#include <stddef.h>\n\n"
         "extern const int8_t g_sample_input[];\n"
         "extern const size_t g_sample_input_len;\n"
-        "extern const char *const g_sample_expected_label;\n"
+        "extern const char *const g_sample_expected_label;\n\n"
+        "#ifdef MEL_FROM_RAW\n"
+        '#include "generated_data/sample_input_meta.h"\n'
+        "extern const int16_t g_sample_raw_audio[];\n"
+        "extern const size_t  g_sample_raw_audio_len;\n"
+        "extern const int16_t g_hann_window_q15[];\n"
+        "extern const int16_t g_mel_matrix_q15[];\n"
+        "extern const float   g_input_quant_scale;\n"
+        "extern const int32_t g_input_quant_zp;\n"
+        "extern const char *const g_sample_raw_expected_label;\n"
+        "#endif\n"
     )
 
     lines = []
@@ -168,6 +180,129 @@ def write_sample_input_c(
         f"const int8_t g_sample_input[] = {{\n{body}\n}};\n"
         f"const size_t g_sample_input_len = {len(q)};\n"
         f'const char *const g_sample_expected_label = "{label.strip()}";\n'
+    )
+
+
+def write_sample_input_raw_c(
+    src_dir: Path,
+    clip: TestClip,
+    tflite_path: Path,
+    generator_name: str,
+) -> None:
+    from utils import (
+        SAMPLE_RATE,
+        FRAME_LENGTH,
+        FRAME_STEP,
+        FFT_LENGTH_MEL,
+        NUM_MEL_BINS_MEL,
+        TARGET_FRAMES_MEL,
+        TARGET_AUDIO_LEN_MEL,
+        LOWER_EDGE_HERTZ,
+        UPPER_EDGE_HERTZ,
+        build_rust_mel_matrix,
+    )
+
+    fft_bins = FFT_LENGTH_MEL // 2
+
+    label, audio, _rel = clip
+    audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+    if audio.size >= TARGET_AUDIO_LEN_MEL:
+        audio_f = audio[:TARGET_AUDIO_LEN_MEL]
+    else:
+        audio_f = np.zeros(TARGET_AUDIO_LEN_MEL, dtype=np.float32)
+        audio_f[: audio.size] = audio
+    audio_i16 = np.clip(np.round(audio_f * 32767.0), -32768, 32767).astype(np.int16)
+
+    n = np.arange(FRAME_LENGTH, dtype=np.float64)
+    hann = 0.5 - 0.5 * np.cos(2.0 * np.pi * n / (FRAME_LENGTH - 1))
+    hann_i16 = np.clip(np.round(hann * 32767.0), -32768, 32767).astype(np.int16)
+
+    _, mel_tf = build_rust_mel_matrix(
+        num_mel_bins=NUM_MEL_BINS_MEL,
+        fft_length_mel=FFT_LENGTH_MEL,
+        frame_length=FRAME_LENGTH,
+        sample_rate=SAMPLE_RATE,
+        lower_edge_hz=LOWER_EDGE_HERTZ,
+        upper_edge_hz=UPPER_EDGE_HERTZ,
+    )
+    mel_t = mel_tf.numpy().T
+    mel_t_i16 = np.clip(np.round(mel_t * 32767.0), -32768, 32767).astype(np.int16)
+
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
+    interpreter.allocate_tensors()
+    inp = interpreter.get_input_details()[0]
+    in_scale, in_zp = inp["quantization"]
+    if in_scale == 0:
+        raise ValueError("TFLite input not int8-quantized.")
+
+    def _dump(arr, per_line=16, width=6):
+        out = []
+        for i in range(0, len(arr), per_line):
+            out.append(
+                "    "
+                + ", ".join(f"{int(v):>{width}d}" for v in arr[i : i + per_line])
+                + ","
+            )
+        return "\n".join(out)
+
+    src_dir = Path(src_dir)
+    data_dir = src_dir / "generated_data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    (data_dir / "sample_audio.inc").write_text(_dump(audio_i16) + "\n")
+    (data_dir / "hann_q15.inc").write_text(_dump(hann_i16) + "\n")
+    (data_dir / "mel_matrix_q15.inc").write_text(_dump(mel_t_i16.reshape(-1)) + "\n")
+
+    (data_dir / "sample_input_meta.h").write_text(
+        "#pragma once\n\n"
+        f"#define MEL_SAMPLE_RATE       {SAMPLE_RATE}\n"
+        f"#define MEL_FRAME_LENGTH      {FRAME_LENGTH}\n"
+        f"#define MEL_FRAME_STEP        {FRAME_STEP}\n"
+        f"#define MEL_TARGET_FRAMES     {TARGET_FRAMES_MEL}\n"
+        f"#define MEL_NUM_BINS          {NUM_MEL_BINS_MEL}\n"
+        f"#define MEL_FFT_BINS          {fft_bins}\n"
+        f"#define MEL_FFT_LENGTH_LOG2   {int(np.log2(FFT_LENGTH_MEL))}\n"
+        f"#define MEL_AUDIO_LEN         {len(audio_i16)}\n\n"
+        f"#define MEL_INPUT_QUANT_SCALE ({float(in_scale):.10g}f)\n"
+        f"#define MEL_INPUT_QUANT_ZP    {int(in_zp)}\n"
+    )
+
+    src_dir.mkdir(parents=True, exist_ok=True)
+    (src_dir / "sample_input_raw.c").write_text(
+        '#include "sample_input.h"\n'
+        '#include "generated_data/sample_input_meta.h"\n\n'
+        "const int16_t g_sample_raw_audio[MEL_AUDIO_LEN] = {\n"
+        '#include "generated_data/sample_audio.inc"\n'
+        "};\n"
+        "const size_t  g_sample_raw_audio_len = MEL_AUDIO_LEN;\n\n"
+        "const int16_t g_hann_window_q15[MEL_FRAME_LENGTH] = {\n"
+        '#include "generated_data/hann_q15.inc"\n'
+        "};\n\n"
+        "const int16_t g_mel_matrix_q15[MEL_NUM_BINS * MEL_FFT_BINS] = {\n"
+        '#include "generated_data/mel_matrix_q15.inc"\n'
+        "};\n\n"
+        "const float   g_input_quant_scale = MEL_INPUT_QUANT_SCALE;\n"
+        "const int32_t g_input_quant_zp = MEL_INPUT_QUANT_ZP;\n"
+        f'const char *const g_sample_raw_expected_label = "{label.strip()}";\n'
+    )
+
+    (src_dir / "sample_input.h").write_text(
+        "#pragma once\n"
+        "#include <stdint.h>\n"
+        "#include <stddef.h>\n\n"
+        "extern const int8_t g_sample_input[];\n"
+        "extern const size_t g_sample_input_len;\n"
+        "extern const char *const g_sample_expected_label;\n\n"
+        "#ifdef MEL_FROM_RAW\n"
+        '#include "generated_data/sample_input_meta.h"\n'
+        "extern const int16_t g_sample_raw_audio[];\n"
+        "extern const size_t  g_sample_raw_audio_len;\n"
+        "extern const int16_t g_hann_window_q15[];\n"
+        "extern const int16_t g_mel_matrix_q15[];\n"
+        "extern const float   g_input_quant_scale;\n"
+        "extern const int32_t g_input_quant_zp;\n"
+        "extern const char *const g_sample_raw_expected_label;\n"
+        "#endif\n"
     )
 
 

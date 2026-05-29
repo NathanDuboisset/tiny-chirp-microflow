@@ -69,13 +69,15 @@ C sources live in `src/` next to the `*.rs` files. Build dir is `build_ncs/` so 
 ### Build & flash
 
 ```bash
-# from repo root
+# from repo root — default: precomputed log-mel input
 nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west build -b nrf54lm20dk/nrf54lm20b/cpuapp -p auto -d build_ncs .'
 nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west flash -d build_ncs'
 picocom -b 115200 /dev/ttyACM1
 ```
+
+Add `-- -DMEL_FROM_RAW=ON` (with `-p always`) to compute the log-mel on the NPU from raw PCM instead. Mel and inference times are then printed on separate lines.
 
 The DK exposes two CDC-ACM ports. App VCOM is `ttyACM1`, `ttyACM0` is the J-Link channel (silent). Reset the board after opening picocom to catch the boot print.
 
@@ -87,4 +89,4 @@ In nRF Connect for VS Code: open the repo root, Add Build Configuration, board `
 ./scripts/compile.sh   # cnn_mel_tf.tflite -> src/generated/nrf_axon_model_cnn_mel_.h
 ```
 
-`src/sample_input.[ch]` is written by `building/export_audio_sample_rs.ipynb` along with the rest of the audio sample files.
+`building/export_audio_sample_rs.ipynb` writes `src/sample_input.[ch]` (precomputed log-mel) and, for `MEL_FROM_RAW`, `src/sample_input_raw.c` + `src/generated_data/*.inc`.
