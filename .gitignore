@@ -24,3 +24,5 @@ audio_samples/
 recordings/
 /building/wandb/
 /scripts/logs
+/logs/
+/src/generated_data/

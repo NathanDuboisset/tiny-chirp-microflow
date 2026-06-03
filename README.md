@@ -68,16 +68,26 @@ C sources live in `src/` next to the `*.rs` files. Build dir is `build_ncs/` so 
 
 ### Build & flash
 
+A `Makefile` at the repo root wraps the `nrfutil toolchain-manager launch ...` invocations:
+
 ```bash
-# from repo root — default: precomputed log-mel input
+make build    # default: precomputed log-mel input
+make mel      # build with -DMEL_FROM_RAW=ON (log-mel computed on the NPU from raw PCM)
+make flash
+make clean
+picocom -b 115200 /dev/ttyACM1
+```
+
+Overridable: `make build BOARD=... NCS_VERSION=v3.4.0 BUILD_DIR=build_other`. With `make mel`, mel and inference times are printed on separate lines.
+
+Raw invocations (equivalent to `make build` / `make flash`):
+
+```bash
 nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west build -b nrf54lm20dk/nrf54lm20b/cpuapp -p auto -d build_ncs .'
 nrfutil toolchain-manager launch --ncs-version v3.3.0 -- bash -c \
   'ZEPHYR_BASE=$HOME/ncs/zephyr west flash -d build_ncs'
-picocom -b 115200 /dev/ttyACM1
 ```
-
-Add `-- -DMEL_FROM_RAW=ON` (with `-p always`) to compute the log-mel on the NPU from raw PCM instead. Mel and inference times are then printed on separate lines.
 
 The DK exposes two CDC-ACM ports. App VCOM is `ttyACM1`, `ttyACM0` is the J-Link channel (silent). Reset the board after opening picocom to catch the boot print.
 

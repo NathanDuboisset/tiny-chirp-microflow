@@ -11,9 +11,14 @@ INT8-quantized TFLite models, evaluated on the test set. Threshold chosen for be
 | sincnet | 15.5 | TBD | 0.8528 | 0.6920 | 0.9956 | 0.9153 |
 | leaf | 23.2 | TBD | 0.5219 | 0.4063 | 0.9847 | 0.7665 |
 
-For reference scores, mel cnn tf model:
-for samples 0 to 3, for testing, 
-clip 0 : 1.8 / 2.9
-clip 1 : -3.9 / 12.4 
-clip 2 : 57.8 /-11.2
-clip 3 : -6.5 / 10.6
+cnn_mel scores (non_target / target) on the 4 testing clips. Delta columns are
+signed relative error vs the host TF reference, `(value - ref) / |ref|`.
+
+| clip | host TF      | mel_cpu          | delta mel_cpu    | mel_axon         | delta mel_axon   |
+|:----:|-------------:|-----------------:|-----------------:|-----------------:|-----------------:|
+| 0    |  1.8 /  2.9  |   1.601 /  2.979 |  -11.1% /  +2.7% |   1.601 /  2.979 |  -11.1% /  +2.7% |
+| 1    | -3.9 / 12.4  |  -4.101 /  9.335 |   -5.2% / -24.7% |  -3.978 /  8.870 |   -2.0% / -28.5% |
+| 2    | 57.8 /-11.2  |  43.801 / -7.824 |  -24.2% / +30.1% |  39.421 / -9.571 |  -31.8% / +14.5% |
+| 3    | -6.5 / 10.6  |  -5.857 /  7.424 |   +9.9% / -30.0% |  -5.210 /  6.275 |  +19.8% / -40.8% |
+
+Per-clip mel extraction time: `mel_cpu` ≈2.62 s, `mel_axon` ≈0.94 s (3 s audio).
