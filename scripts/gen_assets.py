@@ -51,12 +51,12 @@ def main():
         print(f"  clip {i}  {label:<10}  {wav.name}")
 
     write_sample_input_raw_c(
-        src_dir=REPO / "src",
+        src_dir=REPO / "src" / "nrf",
         clips=clips,
         tflite_path=REPO / "models" / "cnn_mel_tf.tflite",
         generator_name="scripts/gen_assets.py",
     )
-    print(f"wrote {len(clips)} clips to src/generated_data/")
+    print(f"wrote {len(clips)} clips to src/nrf/generated_data/")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ LOG_FILE    ?= logs/listen.log
 LAUNCH = nrfutil toolchain-manager launch --ncs-version $(NCS_VERSION) -- bash -c
 WEST   = ZEPHYR_BASE=$(ZEPHYR_BASE) west
 
-.PHONY: build mel_cpu mel_axon flash listen clean menuconfig gen_assets
+.PHONY: build mel_cpu mel_axon sincnet_chunked flash listen clean menuconfig gen_assets compile_cnn_mel compile_sincnet
 
 build:
 	$(LAUNCH) '$(WEST) build -b $(BOARD) -p always -d $(BUILD_DIR) .'
@@ -19,8 +19,20 @@ mel_cpu:
 mel_axon:
 	$(LAUNCH) 'MEL_BACKEND=axon $(WEST) build -b $(BOARD) -p always -d $(BUILD_DIR) .'
 
+sincnet_chunked:
+	$(LAUNCH) 'MODEL=sincnet_chunked $(WEST) build -b $(BOARD) -p always -d $(BUILD_DIR) .'
+
+compile_cnn_mel:
+	bash scripts/compile.sh cnn_mel.yaml
+
+compile_sincnet:
+	bash scripts/compile.sh sincnet_chunked.yaml
+
 gen_assets:
 	.venv/bin/python scripts/gen_assets.py
+
+gen_assets_sincnet:
+	.venv/bin/python scripts/gen_sincnet_assets.py
 
 flash:
 	$(LAUNCH) '$(WEST) flash -d $(BUILD_DIR)'

@@ -22,3 +22,14 @@ signed relative error vs the host TF reference, `(value - ref) / |ref|`.
 | 3    | -6.5 / 10.6  |  -5.857 /  7.424 |   +9.9% / -30.0% |  -5.210 /  6.275 |  +19.8% / -40.8% |
 
 Per-clip mel extraction time: `mel_cpu` ≈2.62 s, `mel_axon` ≈0.94 s (3 s audio).
+
+sincnet_chunked scores (non_target / target) on the 4 testing clips.
+`host TF` is the float Keras model; `host TFLite` is the int8 TFLite model
+run on the same int8 bins shipped to the device.
+
+| clip | host TF        | host TFLite       |
+|:----:|---------------:|------------------:|
+| 0    |  +0.04 / -0.21 |  +1.850 /  -2.158 |
+| 1    | +13.60 / -13.82|  +12.948 / -13.257|
+| 2    | +24.02 / -25.43|  +23.739 / -24.972|
+| 3    | +22.29 / -23.25|  +21.581 / -22.197|

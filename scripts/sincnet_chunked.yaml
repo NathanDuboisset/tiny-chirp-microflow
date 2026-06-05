@@ -1,0 +1,17 @@
+# sincnet_chunked, in [1,47872,1] int8 raw audio, out [1,2]
+# Cropping1D + Reshape at the head fold the 47872-sample input into a
+# (46, 1024, 1) chunked tensor; everything after fits Axon limits.
+
+sincnet_chunked:
+  tflite_model: ../models/sincnet_chunked.tflite
+  model_name: sincnet_chunked
+  classification_labels: ["non_target", "target"]
+  interlayer_buffer_size: 400000
+  psum_buffer_size: 180000
+  conv2d_setting: local_psum
+  psum_buffer_placement: interlayer_buffer
+  normalize_scaleshift: True
+  disable_op_quantization: True
+  skip_softmax_op: False
+  run_all_variants: False
+  log_level: info

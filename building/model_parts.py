@@ -126,6 +126,104 @@ class SincnetConv(tf.keras.layers.Layer):
         return 700.0 * (10.0 ** (mel / 2595.0) - 1.0)
 
 
+class SincnetConvW(tf.keras.layers.Layer):
+    """SincNet on the width (W) axis. Input: (B, H, T, 1) -> (B, H, T_out, num_filters).
+
+    Unlike SincnetConv (kernel on H), kernel_size is honored as-is (no auto-bump
+    to odd) so Axon's max filter dim of 16 stays respected. Each H row (chunk)
+    is processed independently with the same learnable bandpass filterbank.
+    """
+
+    def __init__(self, num_filters: int, kernel_size: int, stride: int,
+                 sample_rate: int = 16000, **kwargs):
+        super().__init__(**kwargs)
+        self.num_filters = num_filters
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.sample_rate = sample_rate
+
+    def build(self, input_shape):
+        mel_min = 0.0
+        mel_max = 2595.0 * np.log10(1.0 + (self.sample_rate / 2.0) / 700.0)
+        mel_points = np.linspace(mel_min, mel_max, self.num_filters + 1)
+        hz_points = 700.0 * (10.0 ** (mel_points / 2595.0) - 1.0)
+        f1_init = hz_points[:-1] / self.sample_rate
+        band_init = np.diff(hz_points) / self.sample_rate
+
+        self.f1 = self.add_weight(
+            name="f1", shape=(self.num_filters,),
+            initializer=tf.keras.initializers.Constant(f1_init), trainable=True,
+        )
+        self.band = self.add_weight(
+            name="band", shape=(self.num_filters,),
+            initializer=tf.keras.initializers.Constant(band_init), trainable=True,
+        )
+        # Odd k -> sample lands on t=0; even k -> centered between two taps.
+        t = np.linspace(-(self.kernel_size // 2), self.kernel_size // 2, self.kernel_size)
+        self.t = tf.constant(t, dtype=tf.float32)
+        window = 0.54 - 0.46 * np.cos(
+            2 * math.pi * np.arange(self.kernel_size) / (self.kernel_size - 1)
+        )
+        self.window = tf.constant(window, dtype=tf.float32)
+
+    def get_filters(self) -> tf.Tensor:
+        f1_safe = tf.math.abs(self.f1)
+        f2_safe = f1_safe + tf.math.abs(self.band)
+        f1_mat = tf.reshape(f1_safe, (1, -1))
+        f2_mat = tf.reshape(f2_safe, (1, -1))
+        t_mat = tf.reshape(self.t, (-1, 1))
+        pi_t = math.pi * t_mat
+        denom = tf.where(t_mat == 0.0, 1.0, pi_t)
+        filters = (
+            tf.math.sin(2.0 * math.pi * f2_mat * t_mat)
+            - tf.math.sin(2.0 * math.pi * f1_mat * t_mat)
+        ) / denom
+        # Only triggered when a sample lands on t=0 (odd kernel). Harmless when even.
+        center_values = 2.0 * (f2_mat - f1_mat)
+        mask = tf.cast(t_mat == 0.0, tf.float32)
+        filters = filters * (1.0 - mask) + center_values * mask
+        filters = filters * tf.reshape(self.window, (-1, 1))
+        return filters  # (kernel_size, num_filters)
+
+    def get_filters_nhwc(self) -> tf.Tensor:
+        # (k_h=1, k_w=kernel_size, in_c=1, out_c=num_filters)
+        return tf.reshape(self.get_filters(), (1, self.kernel_size, 1, self.num_filters))
+
+    def call(self, inputs: tf.Tensor) -> tf.Tensor:
+        return tf.nn.conv2d(
+            inputs,
+            self.get_filters_nhwc(),
+            strides=[1, 1, self.stride, 1],
+            padding="VALID",
+            data_format="NHWC",
+        )
+
+    def export_to_conv2d(self, name: str = "baked_sinc_conv_w") -> tf.keras.layers.Conv2D:
+        baked = self.get_filters().numpy()
+        w = np.reshape(baked, (1, self.kernel_size, 1, self.num_filters))
+        conv_layer = tf.keras.layers.Conv2D(
+            filters=self.num_filters,
+            kernel_size=(1, self.kernel_size),
+            strides=(1, self.stride),
+            padding="valid",
+            use_bias=False,
+            name=name,
+        )
+        conv_layer.build(input_shape=(None, None, None, 1))
+        conv_layer.set_weights([w])
+        return conv_layer
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "num_filters": self.num_filters,
+            "kernel_size": self.kernel_size,
+            "stride": self.stride,
+            "sample_rate": self.sample_rate,
+        })
+        return config
+
+
 class GaborConv1D(tf.keras.layers.Layer):
     """LEAF-style learnable Gabor filterbank (training graph).
 

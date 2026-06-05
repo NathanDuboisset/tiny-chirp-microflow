@@ -1,28 +1,35 @@
+# Build artifacts (Rust + Zephyr)
 /target
 /build
 /build_ncs
 .gdb_history
+
+# Python
+.venv/
 **/*.egg-info/
+**/__pycache__/*
+
+# Notebooks
 .ipynb_checkpoints/
 
-.venv/
-models/*.onnx
-models/*.mlir
+# Models, eval results, generated artifacts
+/models/
+/results/
 src/audio_sample.rs
-/target
-/build
-.gdb_history
+src/nrf/generated_data/
 *_savedmodel/
 *_saved_model/
-**/__pycache__/*
-building_tensorflow/results/
-*.env
-/building_tensorflow/wandb
-/models/checkpoints
 
+# Axon compiler scratch (intermediate bitstream + raw .h before install)
+/scripts/intermediate/
+/scripts/outputs/
+
+# Wandb / training runs
+/building/wandb/
+*.env
+
+# Captures / recordings / device logs
 audio_samples/
 recordings/
-/building/wandb/
-/scripts/logs
 /logs/
-/src/generated_data/
+/scripts/logs/
