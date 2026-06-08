@@ -256,7 +256,6 @@ def write_sample_input_raw_c(
         (data_dir / f"sample_mel_{i}.bin").write_bytes(mel_q8.tobytes())
         labels.append(label.strip())
 
-    (data_dir / "hann_q15.bin").write_bytes(hann_i16.tobytes())
     (data_dir / "hann_even_q15.bin").write_bytes(hann_i16[0::2].tobytes())
     (data_dir / "hann_odd_q15.bin").write_bytes(hann_i16[1::2].tobytes())
     (data_dir / "hann_f32.bin").write_bytes(hann.astype(np.float32).tobytes())

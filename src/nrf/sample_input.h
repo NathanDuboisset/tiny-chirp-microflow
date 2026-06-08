@@ -20,7 +20,9 @@ typedef struct {
 extern const sample_clip_t g_sample_clips[N_SAMPLE_CLIPS];
 
 #ifdef MEL_FROM_RAW
-extern const int16_t g_hann_window_q15[];
+/* The even/odd Hann halves feed the Axon FFT split; the float Hann feeds the
+ * CMSIS CPU FFT. Only one pair is referenced per build, the linker drops the
+ * other. */
 extern const int16_t g_hann_even_q15[];
 extern const int16_t g_hann_odd_q15[];
 extern const float   g_hann_f32[];

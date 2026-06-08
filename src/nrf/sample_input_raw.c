@@ -35,7 +35,6 @@ extern const int16_t g_clip_audio_1[];
 extern const int16_t g_clip_audio_2[];
 extern const int16_t g_clip_audio_3[];
 
-INCBIN(g_hann_window_q15, "generated_data/hann_q15.bin",        2);
 INCBIN(g_hann_even_q15,   "generated_data/hann_even_q15.bin",   2);
 INCBIN(g_hann_odd_q15,    "generated_data/hann_odd_q15.bin",    2);
 INCBIN(g_hann_f32,        "generated_data/hann_f32.bin",        4);
