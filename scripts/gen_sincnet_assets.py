@@ -1,12 +1,17 @@
-"""Generate firmware-side assets for sincnet_chunked:
+"""Build firmware-side assets for the sincnet_chunked path.
 
-- src/generated_data/sample_sincnet_audio_{0..3}.bin : int8 quantized raw audio
-  cropped to NUM_CHUNKS * CHUNK_SIZE samples, ready to feed the Axon model
-  (same memory layout as the (1, 46, 1024, 1) NHWC input tensor).
-- src/generated_data/sample_input_sincnet_meta.h     : sizes + label macros.
+Emits into src/nrf/generated_data/:
+  - sample_sincnet_audio_{0..3}.bin   int8-quantized raw audio, cropped to
+                                      NUM_CHUNKS * CHUNK_SIZE samples and laid
+                                      out as the (1, 46, 1024, 1) NHWC input.
+  - sample_input_sincnet_meta.h       sizes + quant constants + labels.
 
-Picks the same 4 testing clips as gen_assets.py
-(non_target_1, target_1, non_target_2, target_2).
+Clip selection matches gen_assets.py (non_target_1, target_1, non_target_2,
+target_2). The TFLite input quant (scale, zp) is read directly from
+models/sincnet_chunked.tflite, so the firmware sees exactly what the trained
+model expects.
+
+Run:  make gen_assets_sincnet
 """
 
 import sys
@@ -20,7 +25,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "building"))
 from utils import SAMPLE_RATE  # noqa: E402
 
-# Mirror the notebook's geometry.
+# Geometry mirrors the sincnet_chunked.ipynb training notebook.
 CHUNK_SIZE = 1024
 NUM_CHUNKS = 46
 TOTAL_LEN = NUM_CHUNKS * CHUNK_SIZE

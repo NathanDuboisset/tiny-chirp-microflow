@@ -1,3 +1,8 @@
+/*
+ * CMSIS-DSP FFT frontend for mel_compute (reference baseline; runs entirely
+ * on the CPU). Used as ground truth for the Axon-split backend.
+ */
+
 #include <math.h>
 #include <stdbool.h>
 #include <stdint.h>

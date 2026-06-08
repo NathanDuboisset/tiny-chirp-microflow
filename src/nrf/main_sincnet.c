@@ -1,4 +1,9 @@
-#include <assert.h>
+/*
+ * sincnet_chunked entry point: runs the Axon-compiled chunked-SincNet model
+ * over 4 int8-quantized raw-audio clips baked in via gen_sincnet_assets.py.
+ * No on-device preprocessing — the model consumes raw PCM directly.
+ */
+
 #include <string.h>
 
 #include <zephyr/kernel.h>

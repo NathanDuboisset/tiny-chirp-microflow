@@ -1,3 +1,9 @@
+/*
+ * Pulls the cnn_mel sample blobs (raw int16 PCM, baked int8 mel, and — when
+ * MEL_FROM_RAW is set — the Hann window / twiddle / mel-matrix tables) into
+ * .rodata via .incbin, and exposes them through g_sample_clips[].
+ */
+
 #include "sample_input.h"
 
 #define INCBIN(symbol, file, align) \

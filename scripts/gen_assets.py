@@ -1,11 +1,16 @@
-"""Build firmware-side assets:
+"""Build firmware-side assets for the cnn_mel path.
 
-- raw audio + Hann + twiddle + mel matrix as .bin blobs in src/generated_data/
-- sample_input_meta.h with sizes and quantization constants
+Emits into src/nrf/generated_data/:
+  - sample_audio_{0..3}.bin    int16 PCM, MEL_AUDIO_LEN samples each
+  - sample_mel_{0..3}.bin      int8 log-mel reference, baked from the TFLite
+  - hann_{q15,even_q15,odd_q15,f32}.bin, twiddle_f32.bin, mel_matrix_q15.bin
+  - sample_input_meta.h        MEL_* sizes + input quant constants + labels
 
-Picks the same 4 testing clips collect_test_clips_for_rs would have:
+Clip selection mirrors collect_test_clips_for_rs():
 non_target_1, target_1, non_target_2, target_2 (alphabetical within label).
-Loads via librosa so we don't need tensorflow_io.
+Audio is read via librosa to avoid the tensorflow_io dep.
+
+Run:  make gen_assets
 """
 
 import sys
@@ -18,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO / "building"))
 
 from rust_export import write_sample_input_raw_c
-from utils import SAMPLE_RATE
+from utils import SAMPLE_RATE, TARGET_AUDIO_LEN_MEL
 
 
 def _load(path, target_len):
@@ -32,8 +37,6 @@ def _load(path, target_len):
 
 
 def main():
-    from utils import TARGET_AUDIO_LEN_MEL
-
     testing = REPO / "dataset" / "testing"
     nt = sorted(p for p in (testing / "non_target").iterdir() if p.suffix == ".wav")[:2]
     tg = sorted(p for p in (testing / "target").iterdir()     if p.suffix == ".wav")[:2]

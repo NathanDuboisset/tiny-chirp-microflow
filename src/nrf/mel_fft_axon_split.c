@@ -1,3 +1,15 @@
+/*
+ * Axon-backed FFT frontend for mel_compute (alternative to mel_fft_cpu.c).
+ *
+ * The Axon FFT primitive caps at 512 points (axon_fft_24 rejects length_log2
+ * >= 10), so we synthesize the 1024-point real FFT from two 512-point complex
+ * FFTs on the even/odd samples and recombine with the twiddle table:
+ *   X[k] = E[k] + W_N^k * O[k]
+ *
+ * The xty/memset output-stride helpers also cap at length=256 with stride=1,
+ * so the windowing pass is chunked. See project_axon_fft_512_limit.md.
+ */
+
 #include <math.h>
 #include <stdint.h>
 

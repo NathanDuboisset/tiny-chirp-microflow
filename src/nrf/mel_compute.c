@@ -1,3 +1,18 @@
+/*
+ * On-device log-mel pipeline shared by both FFT backends.
+ *
+ * Per frame:
+ *   raw int16 PCM
+ *     -> mel_fft_frame()                    (backend-specific, power spectrum)
+ *     -> axon_sqrt_24  -> magnitude
+ *     -> mar/marx_*    -> mel-filterbank projection
+ *     -> axon_logn     -> natural log (Q11.12)
+ *     -> requantize to int8 using the TFLite input quant (scale, zp)
+ *
+ * mel_fft_log_offset and the input quant constants are supplied by the
+ * selected backend / generated_data.
+ */
+
 #include <math.h>
 #include <stdint.h>
 

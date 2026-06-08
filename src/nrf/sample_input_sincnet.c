@@ -1,3 +1,8 @@
+/*
+ * Pulls the sincnet_chunked int8 audio blobs into .rodata via .incbin and
+ * exposes them through g_sincnet_clips[].
+ */
+
 #include "sample_input_sincnet.h"
 
 #define INCBIN(symbol, file, align) \

@@ -1,4 +1,10 @@
-#include <assert.h>
+/*
+ * cnn_mel entry point: runs the Axon-compiled CNN over 4 baked-in test clips.
+ * If MEL_FROM_RAW is defined the int8 log-mel input is computed on-device from
+ * raw PCM (see mel_compute.c + mel_fft_{cpu,axon_split}.c); otherwise the
+ * pre-computed mel from gen_assets.py is fed directly to the model.
+ */
+
 #include <string.h>
 
 #include <zephyr/kernel.h>

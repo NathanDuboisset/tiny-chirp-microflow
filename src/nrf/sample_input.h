@@ -1,4 +1,11 @@
 #pragma once
+
+/*
+ * Baked-in test clips for the cnn_mel path.
+ * The clip audio/mel blobs and the MEL_* size + quant macros are produced by
+ * scripts/gen_assets.py and linked in via sample_input_raw.c.
+ */
+
 #include <stdint.h>
 #include <stddef.h>
 

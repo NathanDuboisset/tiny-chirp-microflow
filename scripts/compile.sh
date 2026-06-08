@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# axon compile <config.yaml>  ->  src/generated/nrf_axon_model_<model_name>_.h
-# Defaults to cnn_mel.yaml for backwards compatibility.
+# Compile a TFLite model with the Axon ML compiler and install the resulting
+# C header into src/nrf/generated/, where the firmware picks it up.
+#
+# Usage:  scripts/compile.sh <config.yaml>     (e.g. cnn_mel.yaml, sincnet_chunked.yaml)
+# Output: src/nrf/generated/nrf_axon_model_<model_name>_.h
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
